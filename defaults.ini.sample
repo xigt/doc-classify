@@ -1,0 +1,14 @@
+[DEFAULT]
+
+# path for the labels
+label_path = /projects/grants/riples/packages/4b-doc-classify/data/identified_docs.txt
+
+# list of all the URLs for the various documents.
+url_list = /projects/grants/riples/new-pdfs/1-pdf/ODINfullList.txt
+
+# list of the paths of freki docs
+doc_root = /projects/grants/riples/new-pdfs/3-freki/
+doc_glob = ^(?:15[58]|119)
+
+# Where the model path is saved
+model_path = /projects/grants/riples/packages/4b-doc-classify/doc-classifier.model  
