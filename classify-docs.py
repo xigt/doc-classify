@@ -3,15 +3,17 @@ import os, re, pickle
 from argparse import ArgumentParser, ArgumentError
 from configparser import ConfigParser
 from collections import Counter
-
+import gzip
 import sys
-
-
-
-
-
-# Start by loading the default config file.
 from urllib.parse import urlparse
+
+# -------------------------------------------
+# Set up logging
+# -------------------------------------------
+import logging
+LOG = logging.getLogger()
+LOG.addHandler(logging.StreamHandler(sys.stdout))
+
 
 # -------------------------------------------
 # Set up the default config file
@@ -116,28 +118,54 @@ class ClassifierWrapper(object):
     def __init__(self):
         self.learner = LogisticRegression()
         self.dv = DictVectorizer(dtype=int)
-        self.feat_selector = SelectKBest(chi2, 10000)
+        self.feat_selector = None
         self.classes = []
 
-    def train(self, labels, data):
-        vec = self.dv.fit_transform(data, labels)
-        vec = self.feat_selector.fit_transform(vec, labels)
+    def _vectorize(self, data, labels):
+        return self.dv.fit_transform(data, labels)
 
+    def _vectorize_and_select(self, data, labels, num_feats = 10000):
+        vec = self._vectorize(data, labels)
+        if num_feats is not None and num_feats > 0:
+            self.feat_selector = SelectKBest(chi2, 10000)
+            return self.feat_selector.fit_transform(vec, labels)
+        else:
+            return vec
+
+    def train(self, data, labels, num_feats = 10000):
+        vec = self._vectorize_and_select(data, labels, num_feats=num_feats)
         self.learner.fit(vec, labels)
 
     def feat_names(self):
         return np.array(self.dv.get_feature_names())
 
-    def selected_feats(self):
-        return self.feat_selector.get_support()
+    def feat_supports(self):
+        if self.feat_selector is not None:
+            return self.feat_selector.get_support()
+        else:
+            return np.ones((len(self.dv.get_feature_names())), dtype=bool)
 
     def weights(self):
-        return {f:self.learner.coef_[0][j] for j, f in enumerate(self.feat_names()[self.selected_feats()])}
+        return {f: self.learner.coef_[0][j] for j, f in enumerate(self.feat_names()[self.feat_supports()])}
 
     def print_weights(self, n=1000):
         sorted_weights = sorted(self.weights().items(), reverse=True, key=lambda x: x[1])
         for feat_name, weight in sorted_weights[:n]:
             print('{}\t{}'.format(feat_name, weight))
+
+    def save(self, path):
+        f = gzip.GzipFile(path, 'w')
+        pickle.dump(self, f)
+        f.close()
+
+    @classmethod
+    def load(cls, path):
+        f = gzip.GzipFile(path, 'r')
+        c = pickle.load(f)
+        assert isinstance(c, ClassifierWrapper)
+        return c
+
+
 
 def recurse_files(dir, dir_regex=None, file_regex=None):
     dir_regex = re.compile(dir_regex) if dir_regex else None
@@ -246,30 +274,43 @@ def get_training_data(root_dir, label_dict, url_dict):
                 data.append(get_doc_features(fullpath, url_dict))
                 labels.append(label_dict[doc_id])
 
-    return labels, data
+    return data, labels
 
 
 
 
-def train_classifier(config):
+def train_classifier(argdict):
     """
     Train the classifier.
 
-    :type config: ConfigParser
+    :type argdict: dict
     """
     # --1) Get the list of URLs, if it exists
-    url_path = config.get('url_list', fallback=None)
+    LOG.info("Obtaining URL list...")
+    url_path = argdict.get('url_list', None)
     url_dict = get_urls(url_path)
 
     # --2) Get the labels for the training instances
-    label_dict = get_labels(config.get('label_path'))
+    LOG.info("Obtaining label list...")
+    label_dict = get_labels(argdict.get('label_path'))
 
-    labels, data = get_training_data(config.get('doc_root'), label_dict, url_dict)
+    # --3) Extract features from documents with known labels
+    LOG.debug("Extracting training data...")
+    data, labels = get_training_data(argdict.get('doc_root'), label_dict, url_dict)
 
+    # --4) Create the classifier and train on the data
     cw = ClassifierWrapper()
-    cw.train(labels, data)
 
-    cw.print_weights()
+    LOG.info("Beginning training...")
+    cw.train(data, labels, num_feats=None)
+
+    # --5) Save the trained classifier
+    model_path = config.get('model_path')
+    LOG.info('Saving classifier into "{}"'.format(model_path))
+    cw.save(model_path)
+
+
+    # cw.print_weights()
 
 
 
@@ -290,19 +331,19 @@ def def_cp(path):
 
 class ConfigError(Exception): pass
 
-def verify_args(config):
+def process_args(argdict):
     """
     Sanity-check the arguments and print out any errors.
 
-    :type config: DefaultConfigParser
+    :type argdict: dict
     """
     def specified(opt, name):
-        path = config.get(opt, fallback=None)
+        path = argdict.get(opt, None)
         if path is None:
             raise ConfigError("No {} was specified".format(name))
 
     def exists(opt, name):
-        path = config.get(opt, fallback=None)
+        path = argdict.get(opt, None)
         if path is not None and not os.path.exists(path):
             raise ConfigError('The specified {} "{}" was not found'.format(name, path))
 
@@ -315,9 +356,17 @@ def verify_args(config):
     specified_and_exists('doc_root', 'document root')
 
     # Add items to the pythonpath
-    for path_elt in config.get('python_paths', fallback='').split(':'):
+    for path_elt in argdict.get('python_paths', '').split(':'):
         if path_elt:
             sys.path.insert(0, path_elt)
+
+    # Handle verbosity
+    verbosity = int(argdict.get('verbose', 0))
+    if verbosity == 1:
+        LOG.setLevel(logging.INFO)
+    elif verbosity == 2:
+        LOG.setLevel(logging.DEBUG)
+
 
 
 if __name__ == '__main__':
@@ -326,7 +375,7 @@ if __name__ == '__main__':
 
     # Now, add a parser to handle common things like verbosity.
     common_parser = ArgumentParser(add_help=False)
-    common_parser.add_argument('-v', '--verbose', action='store_true')
+    common_parser.add_argument('-v', '--verbose', action='count')
     common_parser.add_argument('-c', '--config', help='Alternate config', type=def_cp)
     common_parser.add_argument('-f', '--force', help="Overwrite files.")
     common_parser.add_argument('-m', '--model-path', help="Path to classifier model.")
@@ -346,15 +395,17 @@ if __name__ == '__main__':
     # Get the config file,
     config = args.config if args.config is not None else DefaultConfigParser(defaults=defaults.defaults())
 
-    # Overwrite stuff from the config files with commandline args
-    # if necessary.
-    if args.model_path: config.set('model_path', args.model_path)
+    # Merge config file and commandline arguments into one dict.
+    argdict = config.defaults()
+    for k, v in vars(args).items():
+        if v is not None:
+            argdict[k] = v
 
     # -------------------------------------------
     # Do error checking of arguments, as well as add
     # any needed paths to PYTHONPATH.
     # -------------------------------------------
-    verify_args(config)
+    process_args(argdict)
 
     # Import nonstandard libs.
     from freki.serialize import FrekiDoc
@@ -365,7 +416,7 @@ if __name__ == '__main__':
     # -------------------------------------------
 
     if args.subcommand == 'train':
-        train_classifier(config)
+        train_classifier(argdict)
     elif args.subcommand == 'test':
         pass
     else:
