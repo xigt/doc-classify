@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os, re, pickle
+import random
+import statistics
 from argparse import ArgumentParser, ArgumentError
 from configparser import ConfigParser
 from collections import Counter
@@ -117,24 +119,52 @@ def get_doc_features(path, url_dict):
 class ClassifierWrapper(object):
     def __init__(self):
         self.learner = LogisticRegression()
+        # self.learner = LinearSVC()
         self.dv = DictVectorizer(dtype=int)
         self.feat_selector = None
         self.classes = []
 
-    def _vectorize(self, data, labels):
-        return self.dv.fit_transform(data, labels)
+    def _vectorize(self, data, testing=False):
+        if testing:
+            return self.dv.transform(data)
+        else:
+            return self.dv.fit_transform(data)
 
-    def _vectorize_and_select(self, data, labels, num_feats = 10000):
-        vec = self._vectorize(data, labels)
+    def _vectorize_and_select(self, data, labels, num_feats = 10000, testing=False):
+        vec = self._vectorize(data, testing=testing)
+
+        # Only do feature selection if num_feats is positive.
         if num_feats is not None and num_feats > 0:
-            self.feat_selector = SelectKBest(chi2, 10000)
-            return self.feat_selector.fit_transform(vec, labels)
+
+            # When training, assume the feature selector needs
+            # to be initialized.
+            if not testing:
+                self.feat_selector = SelectKBest(chi2, num_feats)
+                return self.feat_selector.fit_transform(vec, labels)
+            else:
+                return self.feat_selector.transform(vec)
         else:
             return vec
 
-    def train(self, data, labels, num_feats = 10000):
-        vec = self._vectorize_and_select(data, labels, num_feats=num_feats)
+    def train(self, data, num_feats = 10000):
+        """
+        :type data: list[DocInstance]
+        """
+        labels = [d.label for d in data]
+        feats  = [d.feats for d in data]
+
+        vec = self._vectorize_and_select(feats, labels, num_feats=num_feats, testing=False)
         self.learner.fit(vec, labels)
+
+    def test(self, data):
+        """
+        :type data: list[DocInstance]
+        """
+        labels = [d.label for d in data]
+        feats  = [d.feats for d in data]
+
+        vec = self._vectorize_and_select(feats, labels, testing=True)
+        return self.learner.predict(vec)
 
     def feat_names(self):
         return np.array(self.dv.get_feature_names())
@@ -172,6 +202,9 @@ true_opts = {'t','true','1'}
 false_opts = {'f', 'false', '0'}
 bool_opts = true_opts | false_opts
 
+def true_val(s):
+    return s.lower() in true_opts
+
 def get_labels(label_path):
     """
     Take the file that specifies the file labels and return
@@ -187,13 +220,33 @@ def get_labels(label_path):
                 raise Exception('Unknown label "{}"'.format(label))
             else:
                 label_dict[doc_id] = label.lower() in true_opts
+
+    counts = Counter(label_dict.values())
+
+    LOG.debug("Loaded label dict with {} positive examples, {} negative.".format(
+        counts.get(True), counts.get(False)
+    ))
+
     return label_dict
+
+class DocInstance(object):
+    """
+    Document wrapper
+    """
+    def __init__(self, doc_id, label, feats, path):
+        self.path = path
+        self.doc_id = doc_id
+        self.label = label
+        self.feats = feats
+
+    def get_feats(self, url_dict = None):
+        self.feats = get_doc_features(self.path, url_dict)
+
 
 def get_training_data(root_dir, label_dict, url_dict):
     """
-    :rtype:
+    :rtype: list[DocInstance]
     """
-    labels = []
     data = []
 
     for dirpath, dirnames, filenames in os.walk(root_dir):
@@ -201,10 +254,13 @@ def get_training_data(root_dir, label_dict, url_dict):
             doc_id = get_doc_id(filename)
             if doc_id in label_dict:
                 fullpath = os.path.join(dirpath, filename)
-                data.append(get_doc_features(fullpath, url_dict))
-                labels.append(label_dict[doc_id])
+                feats = get_doc_features(fullpath, url_dict)
+                label = label_dict[doc_id]
+                d = DocInstance(doc_id, label, feats, fullpath)
+                d.get_feats(url_dict=url_dict)
+                data.append(d)
 
-    return data, labels
+    return data
 
 
 
@@ -226,21 +282,101 @@ def train_classifier(argdict):
 
     # --3) Extract features from documents with known labels
     LOG.debug("Extracting training data...")
-    data, labels = get_training_data(argdict.get('doc_root'), label_dict, url_dict)
-
-    # --4) Create the classifier and train on the data
-    cw = ClassifierWrapper()
+    data = get_training_data(argdict.get('doc_root'), label_dict, url_dict)
 
     LOG.info("Beginning training...")
-    cw.train(data, labels, num_feats=None)
 
-    # --5) Save the trained classifier
-    model_path = config.get('model_path')
-    LOG.info('Saving classifier into "{}"'.format(model_path))
-    cw.save(model_path)
+    # --5) Split the training data according to the
+    #      nfold training ratio.
+
+    # Split data starting at this index...
+    train_ratio = float(argdict.get('train_ratio', 1))
+    split_index = int(len(data) * train_ratio)
+    split_window = len(data) - split_index
+
+    seed = argdict.get('random_seed')
+
+    r = random.Random()
+    if seed is not None: r.seed(int(seed))
+
+    # Shuffle the data
+    r.shuffle(data)
+
+    # Split into training, testing:
+    iterations = int(argdict.get('nfold_iterations', '1'))
+
+    LOG.info('Running {} iterations with {} training portion.'.format(
+        iterations, train_ratio))
+
+    matches = 0
+    compares = 0
+    iter_accuracies = []
+
+    for iter in range(iterations):
+        train_portion = data[:split_index]
+        test_portion = data[split_index:]
+
+        # Rename the model by iteration if needed
+        model_path = argdict.get('model_path', 'model.model')
+        if iterations > 1:
+            model_base, model_ext = os.path.splitext(model_path)
+            iter_model_path = '{}_{}{}'.format(model_base, iter, model_ext)
+        else:
+            iter_model_path = model_path
+
+        LOG.info('Training model {} with {} instances'.format(iter_model_path, len(train_portion)))
+        LOG.debug('Training IDs: {}'.format(','.join(['{}:{}'.format(d.doc_id, d.label) for d in train_portion])))
+
+        # -------------------------------------------
+        # Create the classifier wrapper, train and save.
+        # -------------------------------------------
+        cw = ClassifierWrapper()
+        cw.train(train_portion, num_feats=40000)
+        cw.save(iter_model_path)
+        # -------------------------------------------
+
+        if train_ratio < 1.0:
+
+            LOG.info("Testing model {} on {} instances".format(iter_model_path, len(test_portion)))
+            LOG.debug('Testing IDs: {}'.format(','.join([d.doc_id for d in test_portion])))
+
+            gold_labels = [d.label for d in test_portion]
+            test_labels = cw.test(test_portion)
+
+            iter_matches = 0
+            iter_compares = 0
+
+            for test_label, gold_label in zip(test_labels, gold_labels):
+                if test_label == gold_label:
+                    iter_matches += 1
+                iter_compares += 1
+
+            iter_accuracy = iter_matches/iter_compares*100
+            LOG.info('Iteration accuracy: {:.2f}'.format(iter_accuracy))
+            iter_accuracies.append(iter_accuracy)
+
+            matches += iter_matches
+            compares += iter_compares
 
 
-    # cw.print_weights()
+            # Shift the data by the training window...
+            data = data[split_window:] + data[:split_window]
+
+    if train_ratio < 1.0:
+        LOG.info('Overall accuracy: {:.2f}'.format(matches/compares*100))
+        LOG.info('Std. dev: {:.2f}'.format(statistics.stdev(iter_accuracies)))
+    else:
+        LOG.info('Training portion was 100%. No testing performed.')
+
+def test_classifier(argdict):
+    """
+    :type argdict: dict
+    """
+
+    # Load the classifier...
+    LOG.info("Loading model...")
+    model_path = argdict.get('model_path')
+    ClassifierWrapper.load(model_path)
 
 
 
@@ -342,12 +478,13 @@ if __name__ == '__main__':
     from sklearn.feature_extraction.dict_vectorizer import DictVectorizer
     from sklearn.feature_selection.univariate_selection import SelectKBest, chi2
     from sklearn.linear_model.logistic import LogisticRegression
+    from sklearn.svm import LinearSVC, LinearSVR, OneClassSVM
     import numpy as np
     # -------------------------------------------
 
     if args.subcommand == 'train':
         train_classifier(argdict)
     elif args.subcommand == 'test':
-        pass
+        test_classifier(argdict)
     else:
         raise ArgumentError("Unrecognized subcommand")

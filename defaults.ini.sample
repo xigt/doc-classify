@@ -1,14 +1,33 @@
 [DEFAULT]
 
 # path for the labels
-label_path = /projects/grants/riples/packages/4b-doc-classify/data/identified_docs.txt
+label_path = dir_0_training.txt
 
 # list of all the URLs for the various documents.
-url_list = /projects/grants/riples/new-pdfs/1-pdf/ODINfullList.txt
+url_list = ./ODINfullList.txt
 
 # list of the paths of freki docs
-doc_root = /projects/grants/riples/new-pdfs/3-freki/
-doc_glob = ^(?:15[58]|119)
+doc_root = ./dir_0
 
 # Where the model path is saved
-model_path = /projects/grants/riples/packages/4b-doc-classify/doc-classifier.model
+model_path = doc-classifier.model
+
+# Any necessary paths required to add to the pythonpath.
+;python_paths = /projects/grants/riples/packages/2a-freki
+
+# -------------------------------------------
+# Evaluate on training data
+#
+# Perform #{nfold_iterations} of iterations
+# using ({train_ratio}*100)% of the documents
+# for training and ({1-train_ratio}*100)% of
+# data for testing.
+# -------------------------------------------
+
+# Proportion of data to be used for training
+# and n-fold validation.
+train_ratio = 0.9
+nfold_iterations = 10
+
+# Random Seed
+random_seed = 293
