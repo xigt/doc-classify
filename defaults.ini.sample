@@ -3,6 +3,11 @@
 # path for the labels
 label_path = dir_0_training.txt
 
+# Threshold for accepting a positive labeled document.
+# the lower the threshold, the higher the recall, with
+# a potential sacrifice of precision.
+acceptance_thresh = 0.50
+
 # list of all the URLs for the various documents.
 url_list = ./ODINfullList.txt
 

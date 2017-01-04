@@ -3,6 +3,7 @@ import os, re, pickle
 import random
 import statistics
 from argparse import ArgumentParser, ArgumentError
+from collections import defaultdict
 from configparser import ConfigParser
 from collections import Counter
 import gzip
@@ -164,7 +165,7 @@ class ClassifierWrapper(object):
         feats  = [d.feats for d in data]
 
         vec = self._vectorize_and_select(feats, labels, testing=True)
-        return self.learner.predict(vec)
+        return self.learner.predict_proba(vec)
 
     def feat_names(self):
         return np.array(self.dv.get_feature_names())
@@ -184,6 +185,10 @@ class ClassifierWrapper(object):
             print('{}\t{}'.format(feat_name, weight))
 
     def save(self, path):
+        """
+        Serialize the classifier out to a file.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         f = gzip.GzipFile(path, 'w')
         pickle.dump(self, f)
         f.close()
@@ -215,7 +220,7 @@ def get_labels(label_path):
 
     with open(label_path, 'r') as f:
         for line in f:
-            doc_id, label = line.split()
+            doc_id, label = line.split()[:2]
             if label.lower() not in bool_opts:
                 raise Exception('Unknown label "{}"'.format(label))
             else:
@@ -289,10 +294,14 @@ def train_classifier(argdict):
     # --5) Split the training data according to the
     #      nfold training ratio.
 
+    iterations = int(argdict.get('nfold_iterations', '1'))
+
     # Split data starting at this index...
     train_ratio = float(argdict.get('train_ratio', 1))
     split_index = int(len(data) * train_ratio)
-    split_window = len(data) - split_index
+
+    # Shift data by this much each iteration.
+    split_window = int(len(data) * (1 / iterations))
 
     seed = argdict.get('random_seed')
 
@@ -302,14 +311,12 @@ def train_classifier(argdict):
     # Shuffle the data
     r.shuffle(data)
 
-    # Split into training, testing:
-    iterations = int(argdict.get('nfold_iterations', '1'))
+
 
     LOG.info('Running {} iterations with {} training portion.'.format(
         iterations, train_ratio))
 
-    matches = 0
-    compares = 0
+    overall_stats = StatDict()
     iter_accuracies = []
 
     for iter in range(iterations):
@@ -341,32 +348,121 @@ def train_classifier(argdict):
             LOG.debug('Testing IDs: {}'.format(','.join([d.doc_id for d in test_portion])))
 
             gold_labels = [d.label for d in test_portion]
-            test_labels = cw.test(test_portion)
+            test_probs = cw.test(test_portion)
 
-            iter_matches = 0
-            iter_compares = 0
+            test_labels = []
+            # Get the test labels, filtering by threshold
+            acceptance_thresh = float(argdict.get('acceptance_thresh', 0.5))
 
-            for test_label, gold_label in zip(test_labels, gold_labels):
-                if test_label == gold_label:
-                    iter_matches += 1
-                iter_compares += 1
+            # Get the index for the "true" class
+            t_idx = cw.learner.classes_.tolist().index(True)
 
-            iter_accuracy = iter_matches/iter_compares*100
-            LOG.info('Iteration accuracy: {:.2f}'.format(iter_accuracy))
-            iter_accuracies.append(iter_accuracy)
+            for distribution in test_probs:
+                if distribution[t_idx] > acceptance_thresh:
+                    test_labels.append(True)
+                else:
+                    test_labels.append(False)
 
-            matches += iter_matches
-            compares += iter_compares
+            # Calculate stats
+            iter_dict = StatDict()
+            iter_dict.add_iter(test_labels, gold_labels)
+            overall_stats.update(iter_dict)
 
+            LOG.info("Iteration accuracy: {:.2f}".format(iter_dict.accuracy()))
+            iter_accuracies.append(iter_dict.accuracy())
+
+            LOG.info("Iteration P/R/F for positives: {}".format(iter_dict.prf_string(True)))
 
             # Shift the data by the training window...
             data = data[split_window:] + data[:split_window]
 
     if train_ratio < 1.0:
-        LOG.info('Overall accuracy: {:.2f}'.format(matches/compares*100))
+        LOG.info('Overall accuracy: {:.2f}'.format(overall_stats.accuracy()))
+        LOG.info('Overall positive P/R/F: {}'.format(overall_stats.prf_string(True)))
         LOG.info('Std. dev: {:.2f}'.format(statistics.stdev(iter_accuracies)))
     else:
         LOG.info('Training portion was 100%. No testing performed.')
+
+class StatDict():
+    def __init__(self):
+        self._predictdict = defaultdict(int)
+        self._golddict = defaultdict(int)
+        self._matchdict = defaultdict(int)
+        self._classes = set([])
+
+    def add(self, predicted, gold, n=1):
+        self._predictdict[predicted] += n
+        self._golddict[gold] += n
+        if predicted == gold:
+            self._matchdict[gold] += n
+
+        self._classes.add(predicted)
+        self._classes.add(gold)
+
+    def add_iter(self, predicted, gold):
+        assert len(predicted) == len(gold)
+        for p, g in zip(predicted, gold):
+            self.add(p, g)
+
+    def precision(self, cls):
+        num = self._matchdict[cls]
+        denom = self._predictdict[cls]
+        return num/denom if denom != 0 else 0
+
+    def recall(self, cls):
+        num   = self._matchdict[cls]
+        denom = self._golddict[cls]
+        return num / denom if denom != 0 else 0
+
+    def accuracy(self):
+        matches = sum(self._matchdict.values())
+        golds = sum(self._golddict.values())
+        return matches/golds * 100
+
+    def fmeasure(self, cls):
+        num = 2*(self.precision(cls)*self.recall(cls))
+        denom = (self.precision(cls)+self.recall(cls))
+        return num/denom if denom != 0 else 0
+
+    def update(self, o):
+        """
+        :type o: StatDict
+        """
+        assert isinstance(o, StatDict)
+        for k in o._classes:
+            self._golddict[k] += o._golddict[k]
+            self._predictdict[k] += o._predictdict[k]
+            self._matchdict[k] += o._matchdict[k]
+            self._classes.add(k)
+
+    def prf_string(self, cls):
+        return "{:.2f}/{:.2f}/{:.2f}".format(self.precision(cls), self.recall(cls), self.fmeasure(cls))
+
+def analyze_stats(test_labels, gold_labels):
+    """
+    Function to give analysis of model
+    """
+    assert len(test_labels) == len(gold_labels), "Length of label lists disagree"
+
+    match_dict = {True:0, False:0}
+    test_dict = {True:0, False:0}
+    gold_counts = {True:0, False:0}
+
+    total_matches = 0
+
+    for test_label, gold_label in zip(test_labels, gold_labels):
+        if test_label == gold_label:
+            match_dict[test_label] += 1
+            total_matches += 1
+        gold_counts[gold_label] += 1
+        test_dict[test_label] += 1
+
+    accuracy = total_matches / len(test_labels) * 100
+    pos_precision = match_dict[True] / test_dict[True]
+    pos_recall = match_dict[True] / gold_counts[True]
+    pos_fmeasure = 2*(pos_precision+pos_recall)/(pos_precision * pos_recall)
+
+    return accuracy, pos_precision, pos_recall, pos_fmeasure
 
 def test_classifier(argdict):
     """
