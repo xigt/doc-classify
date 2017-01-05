@@ -317,7 +317,7 @@ def train_classifier(argdict):
         iterations, train_ratio))
 
     overall_stats = StatDict()
-    iter_accuracies = []
+    iteration_stats = StatDictList()
 
     for iter in range(iterations):
         train_portion = data[:split_index]
@@ -369,7 +369,7 @@ def train_classifier(argdict):
             overall_stats.update(iter_dict)
 
             LOG.info("Iteration accuracy: {:.2f}".format(iter_dict.accuracy()))
-            iter_accuracies.append(iter_dict.accuracy())
+            iteration_stats.append(iter_dict)
 
             LOG.info("Iteration P/R/F for positives: {}".format(iter_dict.prf_string(True)))
 
@@ -377,9 +377,10 @@ def train_classifier(argdict):
             data = data[split_window:] + data[:split_window]
 
     if train_ratio < 1.0:
-        LOG.info('Overall accuracy: {:.2f}'.format(overall_stats.accuracy()))
         LOG.info('Overall positive P/R/F: {}'.format(overall_stats.prf_string(True)))
-        LOG.info('Std. dev: {:.2f}'.format(statistics.stdev(iter_accuracies)))
+        LOG.info('Overall positive P/R/F Std.dev: {}'.format(iteration_stats.prf_stdev(True)))
+        LOG.info('Overall accuracy: {:.2f}'.format(overall_stats.accuracy()))
+        LOG.info('Accuracy Std. dev: {:.2f}'.format(iteration_stats.a_stdev()))
     else:
         LOG.info('Training portion was 100%. No testing performed.')
 
@@ -437,6 +438,17 @@ class StatDict():
 
     def prf_string(self, cls):
         return "{:.2f}/{:.2f}/{:.2f}".format(self.precision(cls), self.recall(cls), self.fmeasure(cls))
+
+class StatDictList(list):
+    def accuracies(self): return [l.accuracy() for l in self]
+    def precisions(self, cls): return [l.precision(cls) for l in self]
+    def recalls(self, cls): return [l.recall(cls) for l in self]
+    def fmeasures(self, cls): return [l.fmeasure(cls) for l in self]
+    def p_stdev(self, cls): return statistics.stdev(self.precisions(cls))
+    def r_stdev(self, cls): return statistics.stdev(self.recalls(cls))
+    def f_stdev(self, cls): return statistics.stdev(self.fmeasures(cls))
+    def a_stdev(self): return statistics.stdev(self.accuracies())
+    def prf_stdev(self, cls): return '{:.2f}/{:.2f}/{:.2f}'.format(self.p_stdev(cls), self.r_stdev(cls), self.f_stdev(cls))
 
 def analyze_stats(test_labels, gold_labels):
     """
