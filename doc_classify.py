@@ -264,9 +264,6 @@ class DocInstance(object):
         self.label = label
         self.feats = feats
 
-    def get_feats(self, url_dict = None):
-        self.feats = get_doc_features(self.path, url_dict)
-
 
 def get_freki_files(root_dirs):
     file_list = []
@@ -278,24 +275,27 @@ def get_freki_files(root_dirs):
     return file_list
 
 
-def get_training_data(root_dir, label_dict, url_dict):
+def get_data(train_dirs, url_dict, label_dict=None, training=False):
     """
     :rtype: list[DocInstance]
     """
     data = []
-    freki_path_list = get_freki_files(root_dir)
+    freki_path_list = get_freki_files(train_dirs)
     for freki_path in freki_path_list:
             doc_id = get_doc_id(freki_path)
-            if doc_id in label_dict:
+            if not training or doc_id in label_dict:
                 feats = get_doc_features(freki_path, url_dict)
-                label = label_dict[doc_id]
+                label = label_dict[doc_id] if label_dict else None
                 d = DocInstance(doc_id, label, feats, freki_path)
-                d.get_feats(url_dict=url_dict)
                 data.append(d)
 
     return data
 
+def get_training_data(root_dir, url_dict, label_dict):
+    return get_data(root_dir, url_dict, label_dict=label_dict, training=True)
 
+def get_testing_data(root_dir, url_dict):
+    return get_data(root_dir, url_dict, training=False)
 
 
 def train_classifier(argdict):
@@ -315,7 +315,7 @@ def train_classifier(argdict):
 
     # --3) Extract features from documents with known labels
     LOG.debug("Extracting training data...")
-    data = get_training_data(argdict.get('train_dirs'), label_dict, url_dict)
+    data = get_training_data(argdict.get('train_dirs'), url_dict, label_dict)
 
     LOG.info("Beginning training...")
 
