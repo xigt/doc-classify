@@ -15,15 +15,16 @@ from urllib.parse import urlparse
 # Set up logging
 # -------------------------------------------
 import logging
+
 LOG = logging.getLogger()
 LOG.addHandler(logging.StreamHandler(sys.stdout))
-
 
 # -------------------------------------------
 # Set up the default config file
 # -------------------------------------------
 my_dir = os.path.dirname(__file__)
 defaults_path = os.path.join(my_dir, 'defaults.ini')
+
 
 class DefaultConfigParser(ConfigParser):
     @classmethod
@@ -46,8 +47,10 @@ class DefaultConfigParser(ConfigParser):
         for k, v in d.items():
             super().set('DEFAULT', k, v)
 
+
 defaults = DefaultConfigParser()
 if os.path.exists(defaults_path): defaults.read(defaults_path)
+
 
 # -------------------------------------------
 # Process the URL list
@@ -70,6 +73,7 @@ def get_urls(url_path):
     f.close()
     return url_mapping
 
+
 # -------------------------------------------
 # Process the list of IGT containing docs
 # -------------------------------------------
@@ -78,8 +82,10 @@ def get_identified_docs(label_path):
         for line in f:
             yield line.strip()
 
+
 def get_doc_id(path):
     return re.search('([0-9]+)(?:\.freki(?:\.gz)?)', os.path.basename(path)).group(1)
+
 
 # -------------------------------------------
 # Get features from the URL
@@ -89,14 +95,13 @@ def get_url_features(url):
     p = urlparse(url)
     feats.add('url_domain_' + p.netloc)
     [feats.add('url_domain_elt_' + elt) for elt in p.netloc.split('.')]
-    feats.add('url_filename_'+os.path.basename(p.path))
+    feats.add('url_filename_' + os.path.basename(p.path))
 
     for elt in os.path.dirname(p.path.strip()).split('/'):
         if elt.strip():
-            feats.add('url_path_elt_'+elt)
+            feats.add('url_path_elt_' + elt)
 
     return feats
-
 
 
 # -------------------------------------------
@@ -111,12 +116,11 @@ def get_doc_features(path, url_dict):
     """
     doc_id = get_doc_id(path)
 
-
     # -- 1) Get the text features
     text_feats = Counter()
     fd = FrekiDoc.read(path)
     for line in fd.lines():
-        text_feats.update(['word_'+w.lower() for w in re.findall('\w+', line)])
+        text_feats.update(['word_' + w.lower() for w in re.findall('\w+', line)])
 
     feat_dict = dict(text_feats)
 
@@ -127,6 +131,7 @@ def get_doc_features(path, url_dict):
         feat_dict.update({f:1 for f in url_feats})
 
     return feat_dict
+
 
 class ClassifierWrapper(object):
     def __init__(self):
@@ -142,7 +147,7 @@ class ClassifierWrapper(object):
         else:
             return self.dv.fit_transform(data)
 
-    def _vectorize_and_select(self, data, labels, num_feats = None, testing=False):
+    def _vectorize_and_select(self, data, labels, num_feats=None, testing=False):
 
         # Start by vectorizing the data.
         vec = self._vectorize(data, testing=testing)
@@ -152,7 +157,8 @@ class ClassifierWrapper(object):
         # training.
         if testing:
             if self.feat_selector is not None:
-                LOG.info('Feature selection was enabled during training, limiting to {} features.'.format(self.feat_selector.k))
+                LOG.info('Feature selection was enabled during training, limiting to {} features.'.format(
+                    self.feat_selector.k))
                 return self.feat_selector.transform(vec)
             else:
                 return vec
@@ -167,12 +173,12 @@ class ClassifierWrapper(object):
             LOG.info("Feature selection disabled, all available features are used.")
             return vec
 
-    def train(self, data, num_feats = None):
+    def train(self, data, num_feats=None):
         """
         :type data: list[DocInstance]
         """
         labels = [d.label for d in data]
-        feats  = [d.feats for d in data]
+        feats = [d.feats for d in data]
 
         vec = self._vectorize_and_select(feats, labels, num_feats=num_feats, testing=False)
         self.learner.fit(vec, labels)
@@ -182,7 +188,7 @@ class ClassifierWrapper(object):
         :type data: list[DocInstance]
         """
         labels = [d.label for d in data]
-        feats  = [d.feats for d in data]
+        feats = [d.feats for d in data]
 
         vec = self._vectorize_and_select(feats, labels, testing=True)
         return self.learner.predict_proba(vec)
@@ -221,14 +227,14 @@ class ClassifierWrapper(object):
         return c
 
 
-
-
-true_opts = {'t','true','1'}
+true_opts = {'t', 'true', '1'}
 false_opts = {'f', 'false', '0'}
 bool_opts = true_opts | false_opts
 
+
 def true_val(s):
     return s.lower() in true_opts
+
 
 def get_labels(label_path):
     """
@@ -254,10 +260,19 @@ def get_labels(label_path):
 
     return label_dict
 
+
+# =============================================================================
+# Training/Testing abstractions
+#
+# This section deals with creating a class and methods to simplify selecting
+# documents for testing and training and passing the documents to the classifier.
+# =============================================================================
+
 class DocInstance(object):
     """
-    Document wrapper
+    Wrapper class to hold the path, doc_id, label, and features
     """
+
     def __init__(self, doc_id, label, feats, path):
         self.path = path
         self.doc_id = doc_id
@@ -282,20 +297,37 @@ def get_data(train_dirs, url_dict, label_dict=None, training=False):
     data = []
     freki_path_list = get_freki_files(train_dirs)
     for freki_path in freki_path_list:
-            doc_id = get_doc_id(freki_path)
-            if not training or doc_id in label_dict:
-                feats = get_doc_features(freki_path, url_dict)
-                label = label_dict[doc_id] if label_dict else None
-                d = DocInstance(doc_id, label, feats, freki_path)
-                data.append(d)
+        doc_id = get_doc_id(freki_path)
+        if not training or doc_id in label_dict:
+            feats = get_doc_features(freki_path, url_dict)
+            label = label_dict[doc_id] if label_dict else None
+            d = DocInstance(doc_id, label, feats, freki_path)
+            data.append(d)
 
     return data
+
 
 def get_training_data(root_dir, url_dict, label_dict):
     return get_data(root_dir, url_dict, label_dict=label_dict, training=True)
 
+
 def get_testing_data(root_dir, url_dict):
     return get_data(root_dir, url_dict, training=False)
+
+
+# =============================================================================
+# Training/Testing Procedures.
+# =============================================================================
+
+def test_classifier(argdict):
+    """
+    :type argdict: dict
+    """
+
+    # Load the classifier...
+    LOG.info("Loading model...")
+    model_path = argdict.get('model_path')
+    ClassifierWrapper.load(model_path)
 
 
 def train_classifier(argdict):
@@ -339,8 +371,6 @@ def train_classifier(argdict):
     # Shuffle the data
     r.shuffle(data)
 
-
-
     LOG.info('Running {} iterations with {} training portion.'.format(
         iterations, train_ratio))
 
@@ -371,7 +401,7 @@ def train_classifier(argdict):
 
         # Uncomment this out to save all N iterations
         # of the classifier.
-        #cw.save(iter_model_path)
+        # cw.save(iter_model_path)
         # -------------------------------------------
 
         if train_ratio < 1.0:
@@ -416,6 +446,11 @@ def train_classifier(argdict):
     else:
         LOG.info('Training portion was 100%. No testing performed.')
 
+
+# =============================================================================
+# Gathering Statistics
+# =============================================================================
+
 class StatDict():
     def __init__(self):
         self._predictdict = defaultdict(int)
@@ -440,22 +475,22 @@ class StatDict():
     def precision(self, cls):
         num = self._matchdict[cls]
         denom = self._predictdict[cls]
-        return num/denom if denom != 0 else 0
+        return num / denom if denom != 0 else 0
 
     def recall(self, cls):
-        num   = self._matchdict[cls]
+        num = self._matchdict[cls]
         denom = self._golddict[cls]
         return num / denom if denom != 0 else 0
 
     def accuracy(self):
         matches = sum(self._matchdict.values())
         golds = sum(self._golddict.values())
-        return matches/golds * 100
+        return matches / golds * 100
 
     def fmeasure(self, cls):
-        num = 2*(self.precision(cls)*self.recall(cls))
-        denom = (self.precision(cls)+self.recall(cls))
-        return num/denom if denom != 0 else 0
+        num = 2 * (self.precision(cls) * self.recall(cls))
+        denom = (self.precision(cls) + self.recall(cls))
+        return num / denom if denom != 0 else 0
 
     def update(self, o):
         """
@@ -471,16 +506,27 @@ class StatDict():
     def prf_string(self, cls):
         return "{:.2f}/{:.2f}/{:.2f}".format(self.precision(cls), self.recall(cls), self.fmeasure(cls))
 
+
 class StatDictList(list):
     def accuracies(self): return [l.accuracy() for l in self]
+
     def precisions(self, cls): return [l.precision(cls) for l in self]
+
     def recalls(self, cls): return [l.recall(cls) for l in self]
+
     def fmeasures(self, cls): return [l.fmeasure(cls) for l in self]
+
     def p_stdev(self, cls): return statistics.stdev(self.precisions(cls))
+
     def r_stdev(self, cls): return statistics.stdev(self.recalls(cls))
+
     def f_stdev(self, cls): return statistics.stdev(self.fmeasures(cls))
+
     def a_stdev(self): return statistics.stdev(self.accuracies())
-    def prf_stdev(self, cls): return '{:.2f}/{:.2f}/{:.2f}'.format(self.p_stdev(cls), self.r_stdev(cls), self.f_stdev(cls))
+
+    def prf_stdev(self, cls): return '{:.2f}/{:.2f}/{:.2f}'.format(self.p_stdev(cls), self.r_stdev(cls),
+                                                                   self.f_stdev(cls))
+
 
 def analyze_stats(test_labels, gold_labels):
     """
@@ -488,9 +534,9 @@ def analyze_stats(test_labels, gold_labels):
     """
     assert len(test_labels) == len(gold_labels), "Length of label lists disagree"
 
-    match_dict = {True:0, False:0}
-    test_dict = {True:0, False:0}
-    gold_counts = {True:0, False:0}
+    match_dict = {True: 0, False: 0}
+    test_dict = {True: 0, False: 0}
+    gold_counts = {True: 0, False: 0}
 
     total_matches = 0
 
@@ -504,19 +550,15 @@ def analyze_stats(test_labels, gold_labels):
     accuracy = total_matches / len(test_labels) * 100
     pos_precision = match_dict[True] / test_dict[True]
     pos_recall = match_dict[True] / gold_counts[True]
-    pos_fmeasure = 2*(pos_precision+pos_recall)/(pos_precision * pos_recall)
+    pos_fmeasure = 2 * (pos_precision + pos_recall) / (pos_precision * pos_recall)
 
     return accuracy, pos_precision, pos_recall, pos_fmeasure
 
-def test_classifier(argdict):
-    """
-    :type argdict: dict
-    """
 
-    # Load the classifier...
-    LOG.info("Loading model...")
-    model_path = argdict.get('model_path')
-    ClassifierWrapper.load(model_path)
+# =============================================================================
+# Configuration Files
+# =============================================================================
+
 
 # -------------------------------------------
 # Parse a config file if it exists.
@@ -533,7 +575,9 @@ def def_cp(path):
         c = DefaultConfigParser.init_from_path(path, defaults=defaults.defaults())
         return c
 
+
 class ConfigError(Exception): pass
+
 
 def process_args(argdict):
     """
@@ -541,6 +585,7 @@ def process_args(argdict):
 
     :type argdict: dict
     """
+
     def specified(opt, name):
         path = argdict.get(opt, None)
         if path is None:
@@ -584,14 +629,13 @@ def process_args(argdict):
     parse('train_ratio', float, 1.0)
 
 
-
 if __name__ == '__main__':
     # Set up a main argument parser to add subcommands to.
     main_parser = ArgumentParser()
 
     # Now, add a parser to handle common things like verbosity.
     common_parser = ArgumentParser(add_help=False)
-    common_parser.add_argument('-v', '--verbose', action='count')
+    common_parser.add_argument('-v', '--verbose', action='count', help='Increase verbosity of output.')
     common_parser.add_argument('-c', '--config', help='Alternate config', type=def_cp)
     common_parser.add_argument('-d', '--debug', help='Turn on debugging output', action='store_true')
     common_parser.add_argument('-f', '--force', help="Overwrite files.")
@@ -614,6 +658,9 @@ if __name__ == '__main__':
 
     # Nfold cross-validation parser
     nfold_p = subparsers.add_parser('nfold', parents=[common_parser])
+    nfold_p.add_argument('--train-ratio', help='Ratio of training data to testing data, as a decimal between (0-1].', type=float)
+    nfold_p.add_argument('--nfold-iterations', help='Number of train/test iterations to perform.', type=int)
+    nfold_p.add_argument('--random-seed', help='Integer to fix randomization of data shuffling between program invocations.')
 
     args = main_parser.parse_args()
 
@@ -638,6 +685,7 @@ if __name__ == '__main__':
     from sklearn.feature_selection.univariate_selection import SelectKBest, chi2
     from sklearn.linear_model.logistic import LogisticRegression
     import numpy as np
+
     # -------------------------------------------
 
     if args.subcommand == 'train':

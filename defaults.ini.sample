@@ -24,6 +24,7 @@ test_dirs = ./dir_1
 model_path = doc-classifier.model
 
 # Any necessary paths required to add to the pythonpath.
+# Multiple values should be separated by a colon ':'
 ;python_paths = /projects/grants/riples/packages/2a-freki
 
 # -------------------------------------------
