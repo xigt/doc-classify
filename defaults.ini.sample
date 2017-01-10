@@ -1,24 +1,42 @@
 [DEFAULT]
 
 # path for the labels
-label_path = dir_0_training.txt
+label_path = ./data/doc_labels.txt
 
 # Threshold for accepting a positive labeled document.
 # the lower the threshold, the higher the recall, with
 # a potential sacrifice of precision.
-acceptance_thresh = 0.50
+# [Default if unspecified = 0.5]
+;acceptance_thresh = 0.001
 
 # list of all the URLs for the various documents.
-url_list = ./ODINfullList.txt
+url_list = ./data/doc_urls.txt.gz
 
-# list of the paths of freki docs
-doc_root = ./dir_0
+# Root dirs for training docs (ending with .freki or .freki.gz)
+# (separate multiple directories with commas)
+train_dirs = ./dir_0
+
+# Root dir for testing docs (ending with .freki or .freki.gz)
+# (separate multiple directories with commas)
+test_dirs = ./dir_1
 
 # Where the model path is saved
 model_path = doc-classifier.model
 
 # Any necessary paths required to add to the pythonpath.
 ;python_paths = /projects/grants/riples/packages/2a-freki
+
+# -------------------------------------------
+# Feature selection
+#
+# A few basic feature selection options.
+# -------------------------------------------
+
+# The number of features may be limited using
+# the chi^2 test to this number if requested.
+# The model is trained/tested with all available
+# features by default, or if this number is <=0
+;num_features = 80000
 
 # -------------------------------------------
 # Evaluate on training data
@@ -34,5 +52,11 @@ model_path = doc-classifier.model
 train_ratio = 0.9
 nfold_iterations = 10
 
-# Random Seed
+# Random Seed for randomizing the nfold
+# cross-validation runs, while maintaining
+# repeatability
 random_seed = 293
+
+# Produce additional debugging files, such as the
+# features extracted from the training documents.
+;debug = 1

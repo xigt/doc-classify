@@ -8,6 +8,7 @@ from configparser import ConfigParser
 from collections import Counter
 import gzip
 import sys
+from gzip import GzipFile
 from urllib.parse import urlparse
 
 # -------------------------------------------
@@ -53,10 +54,20 @@ if os.path.exists(defaults_path): defaults.read(defaults_path)
 # -------------------------------------------
 def get_urls(url_path):
     url_mapping = {}
-    with open(url_path, 'r') as f:
-        for line in f:
-            num, url = line.split()
-            url_mapping[num] = url
+
+    # Either open the url list as txt or gzip, depending
+    # on the extension.
+    if url_path.endswith('.gz'):
+        f = GzipFile(url_path, 'rb')
+    else:
+        f = open(url_path, 'rb')
+
+    for line in f:
+        line = line.decode()
+        num, url = line.split()
+        url_mapping[num] = url
+
+    f.close()
     return url_mapping
 
 # -------------------------------------------
@@ -68,7 +79,7 @@ def get_identified_docs(label_path):
             yield line.strip()
 
 def get_doc_id(path):
-    return re.search('([0-9]+)', os.path.basename(path)).group(1)
+    return re.search('([0-9]+)(?:\.freki(?:\.gz)?)', os.path.basename(path)).group(1)
 
 # -------------------------------------------
 # Get features from the URL
@@ -131,23 +142,32 @@ class ClassifierWrapper(object):
         else:
             return self.dv.fit_transform(data)
 
-    def _vectorize_and_select(self, data, labels, num_feats = 10000, testing=False):
+    def _vectorize_and_select(self, data, labels, num_feats = None, testing=False):
+
+        # Start by vectorizing the data.
         vec = self._vectorize(data, testing=testing)
 
-        # Only do feature selection if num_feats is positive.
-        if num_feats is not None and num_feats > 0:
-
-            # When training, assume the feature selector needs
-            # to be initialized.
-            if not testing:
-                self.feat_selector = SelectKBest(chi2, num_feats)
-                return self.feat_selector.fit_transform(vec, labels)
-            else:
+        # Next, filter the data if in testing mode, according
+        # to whatever feature selector was defined during
+        # training.
+        if testing:
+            if self.feat_selector is not None:
+                LOG.info('Feature selection was enabled during training, limiting to {} features.'.format(self.feat_selector.k))
                 return self.feat_selector.transform(vec)
+            else:
+                return vec
+
+        # Only do feature selection if num_feats is positive.
+        elif num_feats is not None and (num_feats > 0):
+            LOG.info('Feature selection enabled, limiting to {} features.'.format(num_feats))
+            self.feat_selector = SelectKBest(chi2, num_feats)
+            return self.feat_selector.fit_transform(vec, labels)
+
         else:
+            LOG.info("Feature selection disabled, all available features are used.")
             return vec
 
-    def train(self, data, num_feats = 10000):
+    def train(self, data, num_feats = None):
         """
         :type data: list[DocInstance]
         """
@@ -248,20 +268,28 @@ class DocInstance(object):
         self.feats = get_doc_features(self.path, url_dict)
 
 
+def get_freki_files(root_dirs):
+    file_list = []
+    for root_dir in root_dirs.split(','):
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            for filename in filenames:
+                if filename.endswith('.freki') or filename.endswith('.freki.gz'):
+                    file_list.append(os.path.join(dirpath, filename))
+    return file_list
+
+
 def get_training_data(root_dir, label_dict, url_dict):
     """
     :rtype: list[DocInstance]
     """
     data = []
-
-    for dirpath, dirnames, filenames in os.walk(root_dir):
-        for filename in filenames:
-            doc_id = get_doc_id(filename)
+    freki_path_list = get_freki_files(root_dir)
+    for freki_path in freki_path_list:
+            doc_id = get_doc_id(freki_path)
             if doc_id in label_dict:
-                fullpath = os.path.join(dirpath, filename)
-                feats = get_doc_features(fullpath, url_dict)
+                feats = get_doc_features(freki_path, url_dict)
                 label = label_dict[doc_id]
-                d = DocInstance(doc_id, label, feats, fullpath)
+                d = DocInstance(doc_id, label, feats, freki_path)
                 d.get_feats(url_dict=url_dict)
                 data.append(d)
 
@@ -287,17 +315,17 @@ def train_classifier(argdict):
 
     # --3) Extract features from documents with known labels
     LOG.debug("Extracting training data...")
-    data = get_training_data(argdict.get('doc_root'), label_dict, url_dict)
+    data = get_training_data(argdict.get('train_dirs'), label_dict, url_dict)
 
     LOG.info("Beginning training...")
 
     # --5) Split the training data according to the
     #      nfold training ratio.
 
-    iterations = int(argdict.get('nfold_iterations', '1'))
+    iterations = argdict.get('nfold_iterations')
 
     # Split data starting at this index...
-    train_ratio = float(argdict.get('train_ratio', 1))
+    train_ratio = argdict.get('train_ratio')
     split_index = int(len(data) * train_ratio)
 
     # Shift data by this much each iteration.
@@ -338,8 +366,12 @@ def train_classifier(argdict):
         # Create the classifier wrapper, train and save.
         # -------------------------------------------
         cw = ClassifierWrapper()
-        cw.train(train_portion, num_feats=40000)
-        cw.save(iter_model_path)
+
+        cw.train(train_portion, num_feats=argdict.get('num_features'))
+
+        # Uncomment this out to save all N iterations
+        # of the classifier.
+        #cw.save(iter_model_path)
         # -------------------------------------------
 
         if train_ratio < 1.0:
@@ -486,8 +518,6 @@ def test_classifier(argdict):
     model_path = argdict.get('model_path')
     ClassifierWrapper.load(model_path)
 
-
-
 # -------------------------------------------
 # Parse a config file if it exists.
 # -------------------------------------------
@@ -527,7 +557,7 @@ def process_args(argdict):
 
     specified_and_exists('label_path', 'Label Path')
     exists('url_path', "URL Path")
-    specified_and_exists('doc_root', 'document root')
+    specified_and_exists('train_dirs', 'document root')
 
     # Add items to the pythonpath
     for path_elt in argdict.get('python_paths', '').split(':'):
@@ -541,6 +571,18 @@ def process_args(argdict):
     elif verbosity == 2:
         LOG.setLevel(logging.DEBUG)
 
+    # Parse ints if needed
+    def parse(arg, func=int, default=None):
+        if argdict.get(arg) is not None:
+            argdict[arg] = func(argdict.get(arg))
+        elif default is not None:
+            argdict[arg] = default
+
+    parse('num_features', int)
+    parse('random_seed', int)
+    parse('nfold_iterations', int, 1)
+    parse('train_ratio', float, 1.0)
+
 
 
 if __name__ == '__main__':
@@ -551,6 +593,7 @@ if __name__ == '__main__':
     common_parser = ArgumentParser(add_help=False)
     common_parser.add_argument('-v', '--verbose', action='count')
     common_parser.add_argument('-c', '--config', help='Alternate config', type=def_cp)
+    common_parser.add_argument('-d', '--debug', help='Turn on debugging output', action='store_true')
     common_parser.add_argument('-f', '--force', help="Overwrite files.")
     common_parser.add_argument('-m', '--model-path', help="Path to classifier model.")
 
@@ -558,11 +601,19 @@ if __name__ == '__main__':
     subparsers = main_parser.add_subparsers(help='Valid subcommands', dest='subcommand')
     subparsers.required = True
 
-    # Training parser
+    # -------------------------------------------
+    # Subcommand parsers
+    # -------------------------------------------
+
+    # Training
     train_p = subparsers.add_parser('train', parents=[common_parser])
+    train_p.add_argument('--num-features', help='Number of features to limit training the model with.')
 
     # Testing parser
     test_p = subparsers.add_parser('test', parents=[common_parser])
+
+    # Nfold cross-validation parser
+    nfold_p = subparsers.add_parser('nfold', parents=[common_parser])
 
     args = main_parser.parse_args()
 
@@ -581,18 +632,25 @@ if __name__ == '__main__':
     # -------------------------------------------
     process_args(argdict)
 
-    # Import nonstandard libs.
+    # Import nonstandard libs
     from freki.serialize import FrekiDoc
     from sklearn.feature_extraction.dict_vectorizer import DictVectorizer
     from sklearn.feature_selection.univariate_selection import SelectKBest, chi2
     from sklearn.linear_model.logistic import LogisticRegression
-    from sklearn.svm import LinearSVC, LinearSVR, OneClassSVM
     import numpy as np
     # -------------------------------------------
 
     if args.subcommand == 'train':
+        # Perform the same task as training,
+        # but without multiple iterations.
+        argdict['train_ratio'] = 1.0
+        argdict['nfold_iterations'] = 1
         train_classifier(argdict)
     elif args.subcommand == 'test':
         test_classifier(argdict)
+    elif args.subcommand == 'nfold':
+        # Perform n-fold cross-validation on
+        # the training data.
+        train_classifier(argdict)
     else:
         raise ArgumentError("Unrecognized subcommand")
