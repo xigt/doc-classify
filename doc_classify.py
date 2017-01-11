@@ -147,22 +147,35 @@ def get_doc_features(path, url_dict, lang_set):
     # -- 1) Get the text features
     text_feats = Counter()
     fd = FrekiDoc.read(path)
-    for i, line in enumerate(fd.lines()):
+
+    use_bigrams = true_val(argdict.get(USE_BIGRAMS, False))
+
+    for l_i, line in enumerate(fd.lines()):
 
         words = []
         # Operate on each of the words of the sentence.
-        for word in re.findall('\w+', line):
+        words = re.findall('\w+', line, flags=re.UNICODE)
+        for w_i, word in enumerate(words):
             word = word.lower()
             words.append(word)
             word_lengths.append(len(word))
+
+            # Add words as special feature if in the range
+            # where it might be part of the title or author.
+            if l_i < 20:
+                text_feats['title_word_{}'.format(word)] = 1
 
             # Check whether a word is a language name in
             # the text or title
             if lang_set and word in lang_set:
                 text_feats['has_langname'] = 1
-                if i < 20:
+                if l_i < 20:
                     text_feats['has_lang_name_in_title'] = 1
 
+            # Add bigrams as features if enabled.
+            if use_bigrams and w_i < len(words) - 2:
+                w_j = words[w_i + 1]
+                text_feats['bigram_{}_{}'.format(w_i, w_j)] = 1
 
         text_feats.update(['word_' + w for w in words])
 
@@ -170,21 +183,6 @@ def get_doc_features(path, url_dict, lang_set):
         # doesn't have to be done a second time.
         pages.add(line.block.page)
         [fonts.add(f) for f in line]
-
-        # Add bigrams as features if enabled. False
-        # by default.
-        if true_val(argdict.get(USE_BIGRAMS, False)):
-            for i in range(len(words)-2):
-                w_i = words[i]
-                w_j = words[i+1]
-                text_feats['bigram_{}_{}'.format(w_i, w_j)] = 1
-
-        # If the word is in the first N lines, give it
-        # a separate lead_word_ prefix to differentiate it.
-        # (with the assumption that things like author and title
-        # might be more significant than in the rest of the body)
-        if i < 10:
-            text_feats.update(['lead_word_' + w for w in words])
 
     feat_dict = dict(text_feats)
 
@@ -215,7 +213,6 @@ def get_doc_features(path, url_dict, lang_set):
 class ClassifierWrapper(object):
     def __init__(self):
         self.learner = LogisticRegression()
-        # self.learner = LinearSVC()
         self.dv = DictVectorizer(dtype=int)
         self.feat_selector = None
         self.classes = []
