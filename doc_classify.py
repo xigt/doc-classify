@@ -17,7 +17,16 @@ from urllib.parse import urlparse
 import logging
 
 LOG = logging.getLogger()
-LOG.addHandler(logging.StreamHandler(sys.stdout))
+NORM_LEVEL = 40
+logging.addLevelName(NORM_LEVEL, 'NORM')
+stdout_handler = logging.StreamHandler(sys.stdout)
+
+
+stdout_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+LOG.addHandler(stdout_handler)
+
+def normlog(msg):
+    LOG.log(NORM_LEVEL, msg)
 
 # -------------------------------------------
 # Set up the default config file
@@ -38,14 +47,14 @@ class DefaultConfigParser(ConfigParser):
         return c
 
     def get(self, option, *args, **kwargs):
-        return super().get('DEFAULT', option, **kwargs)
+        return super().get(DEFAULT_STR, option, **kwargs)
 
     def set(self, option, value=None):
-        super().set('DEFAULT', option, value)
+        super().set(DEFAULT_STR, option, value)
 
     def update(self, d):
         for k, v in d.items():
-            super().set('DEFAULT', k, v)
+            super().set(DEFAULT_STR, k, v)
 
 
 defaults = DefaultConfigParser()
@@ -72,6 +81,18 @@ def get_urls(url_path):
 
     f.close()
     return url_mapping
+
+def load_langset(lang_path):
+    """
+    :param lang_path: Path to list of languages
+    :rtype: set
+    """
+    lang_set = set([])
+    if lang_path and os.path.exists(lang_path):
+        with open(lang_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                lang_set.add(line.strip().lower())
+    return lang_set
 
 
 # -------------------------------------------
@@ -107,7 +128,7 @@ def get_url_features(url):
 # -------------------------------------------
 # Get features for a given document
 # -------------------------------------------
-def get_doc_features(path, url_dict):
+def get_doc_features(path, url_dict, lang_set):
     """
     Given the path to a document and the url dict,
     return a dictionary of {featname:val} pairs.
@@ -116,11 +137,54 @@ def get_doc_features(path, url_dict):
     """
     doc_id = get_doc_id(path)
 
+    # Keep track of the set of pages that have been seen
+    # so we can know how many there were in the original doc.
+    pages = set([])
+    fonts = set([])
+
+    word_lengths = []
+
     # -- 1) Get the text features
     text_feats = Counter()
     fd = FrekiDoc.read(path)
-    for line in fd.lines():
-        text_feats.update(['word_' + w.lower() for w in re.findall('\w+', line)])
+    for i, line in enumerate(fd.lines()):
+
+        words = []
+        # Operate on each of the words of the sentence.
+        for word in re.findall('\w+', line):
+            word = word.lower()
+            words.append(word)
+            word_lengths.append(len(word))
+
+            # Check whether a word is a language name in
+            # the text or title
+            if lang_set and word in lang_set:
+                text_feats['has_langname'] = 1
+                if i < 20:
+                    text_feats['has_lang_name_in_title'] = 1
+
+
+        text_feats.update(['word_' + w for w in words])
+
+        # Get the pages and fonts once so it
+        # doesn't have to be done a second time.
+        pages.add(line.block.page)
+        [fonts.add(f) for f in line]
+
+        # Add bigrams as features if enabled. False
+        # by default.
+        if true_val(argdict.get(USE_BIGRAMS, False)):
+            for i in range(len(words)-2):
+                w_i = words[i]
+                w_j = words[i+1]
+                text_feats['bigram_{}_{}'.format(w_i, w_j)] = 1
+
+        # If the word is in the first N lines, give it
+        # a separate lead_word_ prefix to differentiate it.
+        # (with the assumption that things like author and title
+        # might be more significant than in the rest of the body)
+        if i < 10:
+            text_feats.update(['lead_word_' + w for w in words])
 
     feat_dict = dict(text_feats)
 
@@ -129,6 +193,21 @@ def get_doc_features(path, url_dict):
         url = url_dict[doc_id]
         url_feats = get_url_features(url)
         feat_dict.update({f:1 for f in url_feats})
+
+    # -- 3) Add other features
+    if len(word_lengths) > 1:
+        avg_wd_length = statistics.mean(word_lengths)
+        feat_dict['long_words'] = avg_wd_length > 10
+
+    # Are there a ton of fonts in the doc?
+    num_fonts = len(fonts)
+    feat_dict['one_font'] = num_fonts == 1
+    feat_dict['few_fonts'] = 1 > num_fonts > 10
+    feat_dict['many_fonts'] = num_fonts > 10
+
+    # Is the length of the document
+    feat_dict['gt_4_pages'] = len(pages) > 4
+    feat_dict['gt_8_pages'] = len(pages) > 8
 
     return feat_dict
 
@@ -173,7 +252,7 @@ class ClassifierWrapper(object):
             LOG.info("Feature selection disabled, all available features are used.")
             return vec
 
-    def train(self, data, num_feats=None):
+    def train(self, data, num_feats=None, weight_path=None):
         """
         :type data: list[DocInstance]
         """
@@ -182,16 +261,31 @@ class ClassifierWrapper(object):
 
         vec = self._vectorize_and_select(feats, labels, num_feats=num_feats, testing=False)
         self.learner.fit(vec, labels)
+        if weight_path is not None:
+            LOG.info('Writing feature weights to "{}"'.format(weight_path))
+            self.dump_weights(weight_path)
 
     def test(self, data):
         """
+        Given a list of document instances, return a list
+        of the probabilities of the Positive, Negative examples.
+
         :type data: list[DocInstance]
+        :rtype: list[tuple[float, float]]
         """
         labels = [d.label for d in data]
         feats = [d.feats for d in data]
 
         vec = self._vectorize_and_select(feats, labels, testing=True)
-        return self.learner.predict_proba(vec)
+
+        # Get the index of the True value...
+        t_idx = self.learner.classes_.tolist().index(True)
+        f_idx = 0 if t_idx == 1 else 1
+
+        # Now, make sure the returned list is always [P(True), P(False)]
+        probs = [(p[t_idx], p[f_idx]) for p in self.learner.predict_proba(vec)]
+
+        return probs
 
     def feat_names(self):
         return np.array(self.dv.get_feature_names())
@@ -205,10 +299,11 @@ class ClassifierWrapper(object):
     def weights(self):
         return {f: self.learner.coef_[0][j] for j, f in enumerate(self.feat_names()[self.feat_supports()])}
 
-    def print_weights(self, n=1000):
-        sorted_weights = sorted(self.weights().items(), reverse=True, key=lambda x: x[1])
-        for feat_name, weight in sorted_weights[:n]:
-            print('{}\t{}'.format(feat_name, weight))
+    def dump_weights(self, path, n=-1):
+        with open(path, 'w') as f:
+            sorted_weights = sorted(self.weights().items(), reverse=True, key=lambda x: x[1])
+            for feat_name, weight in sorted_weights[:n]:
+                f.write('{}\t{}\n'.format(feat_name, weight))
 
     def save(self, path):
         """
@@ -227,13 +322,13 @@ class ClassifierWrapper(object):
         return c
 
 
-true_opts = {'t', 'true', '1'}
-false_opts = {'f', 'false', '0'}
+true_opts = {'t', 'true', '1', 'on'}
+false_opts = {'f', 'false', '0', 'off'}
 bool_opts = true_opts | false_opts
 
 
 def true_val(s):
-    return s.lower() in true_opts
+    return str(s).lower() in true_opts
 
 
 def get_labels(label_path):
@@ -254,7 +349,7 @@ def get_labels(label_path):
 
     counts = Counter(label_dict.values())
 
-    LOG.debug("Loaded label dict with {} positive examples, {} negative.".format(
+    LOG.info("Loaded label dict with {} positive examples, {} negative.".format(
         counts.get(True), counts.get(False)
     ))
 
@@ -280,9 +375,16 @@ class DocInstance(object):
         self.feats = feats
 
 
-def get_freki_files(root_dirs):
+def get_freki_files(data_dirs):
+    """
+    Walk through the given list of directories and return
+    a list of the freki files.
+
+    :param data_dirs: A colon-separated string of directories
+    :rtype: list[str]
+    """
     file_list = []
-    for root_dir in root_dirs.split(','):
+    for root_dir in data_dirs.split(':'):
         for dirpath, dirnames, filenames in os.walk(root_dir):
             for filename in filenames:
                 if filename.endswith('.freki') or filename.endswith('.freki.gz'):
@@ -290,16 +392,19 @@ def get_freki_files(root_dirs):
     return file_list
 
 
-def get_data(train_dirs, url_dict, label_dict=None, training=False):
+def get_data(data_dirs, url_dict, lang_set, label_dict=None, training=False):
     """
+    Get a list of doc instances (with extracted features) for a
+    given list of data directories.
+
     :rtype: list[DocInstance]
     """
     data = []
-    freki_path_list = get_freki_files(train_dirs)
+    freki_path_list = get_freki_files(data_dirs)
     for freki_path in freki_path_list:
         doc_id = get_doc_id(freki_path)
         if not training or doc_id in label_dict:
-            feats = get_doc_features(freki_path, url_dict)
+            feats = get_doc_features(freki_path, url_dict, lang_set)
             label = label_dict[doc_id] if label_dict else None
             d = DocInstance(doc_id, label, feats, freki_path)
             data.append(d)
@@ -307,12 +412,11 @@ def get_data(train_dirs, url_dict, label_dict=None, training=False):
     return data
 
 
-def get_training_data(root_dir, url_dict, label_dict):
-    return get_data(root_dir, url_dict, label_dict=label_dict, training=True)
+def get_training_data(root_dir, url_dict, lang_set, label_dict):
+    return get_data(root_dir, url_dict, lang_set, label_dict=label_dict, training=True)
 
-
-def get_testing_data(root_dir, url_dict):
-    return get_data(root_dir, url_dict, training=False)
+def get_testing_data(root_dir, url_dict, lang_set):
+    return get_data(root_dir, url_dict, lang_set, training=False)
 
 
 # =============================================================================
@@ -323,11 +427,61 @@ def test_classifier(argdict):
     """
     :type argdict: dict
     """
+    # --0) Attempt to open the file to write classifications.
+    test_output = argdict.get(TEST_OUTPUT)
+    test_output_dir = os.path.dirname(test_output)
+    try:
+        os.makedirs(test_output_dir, exist_ok=True)
+    except OSError:
+        LOG.critical('Directory "{}" could not be created.'.format(test_output_dir))
 
-    # Load the classifier...
-    LOG.info("Loading model...")
-    model_path = argdict.get('model_path')
-    ClassifierWrapper.load(model_path)
+    if not os.access(test_output_dir, os.W_OK):
+        LOG.critical('Directory for output file "{}" not writable.'.format(test_output))
+
+    # --1) Load the classifier...
+    normlog("Loading model...")
+    model_path = argdict.get(MODEL_PATH)
+    cw = ClassifierWrapper.load(model_path)
+
+    # --2) Load the URL dict...
+    url_dict = load_urldict(argdict.get(URL_PATH))
+
+    # --2b) Load the lang list...
+    lang_set = load_langset(argdict.get(LANG_PATH))
+
+    # --3) Get the files to be classified...
+    data = get_testing_data(argdict.get(TEST_DIRS), url_dict, lang_set)
+
+    # --4) Classify the testing data..
+    test_probs = cw.test(data)
+
+    # split docs into pos, neg
+    pos_docs = []
+    neg_docs = []
+
+    acceptance_thresh = argdict.get(ACCEPTANCE_THRESH)
+    for distribution, doc in zip(test_probs, data):
+        prob_t, prob_f = distribution
+        if prob_t > acceptance_thresh:
+            pos_docs.append((doc.doc_id, prob_t, prob_f))
+        else:
+            neg_docs.append((doc.doc_id, prob_t, prob_f))
+
+    def list_docs(title, docs):
+        f.write(title+'\n')
+        f.write('{:8s}{:10s}{:10s}\n'.format('doc_id', 'prob_t', 'prob_f'+'\n'))
+        for doc_id, prob_t, prob_f in docs:
+            f.write('{:8s}{:10.3g}{:10.3g}\n'.format(doc_id, prob_t, prob_f))
+
+    LOG.info("Writing out test classifications...")
+    with open(test_output, 'w') as f:
+        divider = '- '*40+'\n'
+        f.write(divider+'Classification Results\n'+divider)
+        f.write('Acceptance threshold: {:.3e}\n'.format(acceptance_thresh)+divider)
+        list_docs('POSITIVE DOCS', pos_docs)
+        list_docs('NEGATIVE DOCS', neg_docs)
+
+    LOG.info("Testing Complete.")
 
 
 def train_classifier(argdict):
@@ -336,34 +490,35 @@ def train_classifier(argdict):
 
     :type argdict: dict
     """
-    # --1) Get the list of URLs, if it exists
-    LOG.info("Obtaining URL list...")
-    url_path = argdict.get('url_list', None)
-    url_dict = get_urls(url_path)
+    # --1a) Get the list of URLs
+    url_dict = load_urldict(argdict.get(URL_PATH))
+
+    # --1b) Get the list of langs
+    lang_set = load_langset(argdict.get(LANG_PATH))
 
     # --2) Get the labels for the training instances
-    LOG.info("Obtaining label list...")
+    normlog("Obtaining label list...")
     label_dict = get_labels(argdict.get('label_path'))
 
     # --3) Extract features from documents with known labels
     LOG.debug("Extracting training data...")
-    data = get_training_data(argdict.get('train_dirs'), url_dict, label_dict)
+    data = get_training_data(argdict.get(TRAIN_DIRS), url_dict, lang_set, label_dict)
 
     LOG.info("Beginning training...")
 
     # --5) Split the training data according to the
     #      nfold training ratio.
 
-    iterations = argdict.get('nfold_iterations')
+    iterations = argdict.get(NFOLD_ITERS)
 
     # Split data starting at this index...
-    train_ratio = argdict.get('train_ratio')
+    train_ratio = argdict.get(TRAIN_RATIO)
     split_index = int(len(data) * train_ratio)
 
     # Shift data by this much each iteration.
     split_window = int(len(data) * (1 / iterations))
 
-    seed = argdict.get('random_seed')
+    seed = argdict.get(RAND_SEED)
 
     r = random.Random()
     if seed is not None: r.seed(int(seed))
@@ -382,7 +537,7 @@ def train_classifier(argdict):
         test_portion = data[split_index:]
 
         # Rename the model by iteration if needed
-        model_path = argdict.get('model_path', 'model.model')
+        model_path = argdict.get(MODEL_PATH, 'model.model')
         if iterations > 1:
             model_base, model_ext = os.path.splitext(model_path)
             iter_model_path = '{}_{}{}'.format(model_base, iter, model_ext)
@@ -397,7 +552,16 @@ def train_classifier(argdict):
         # -------------------------------------------
         cw = ClassifierWrapper()
 
-        cw.train(train_portion, num_feats=argdict.get('num_features'))
+        if true_val(argdict.get(DEBUG)):
+            weight_path = os.path.splitext(iter_model_path)[0]+'_weights.txt'
+        else:
+            weight_path = None
+
+        print(weight_path)
+
+        cw.train(train_portion,
+                 num_feats=argdict.get(NUM_FEATS),
+                 weight_path=weight_path)
 
         # Uncomment this out to save all N iterations
         # of the classifier.
@@ -414,16 +578,13 @@ def train_classifier(argdict):
 
             test_labels = []
             # Get the test labels, filtering by threshold
-            acceptance_thresh = float(argdict.get('acceptance_thresh', 0.5))
+            acceptance_thresh = argdict.get(ACCEPTANCE_THRESH, 0.5)
 
             # Get the index for the "true" class
             t_idx = cw.learner.classes_.tolist().index(True)
 
-            for distribution in test_probs:
-                if distribution[t_idx] > acceptance_thresh:
-                    test_labels.append(True)
-                else:
-                    test_labels.append(False)
+            for prob_t, prob_f in test_probs:
+                test_labels.append(prob_t > acceptance_thresh)
 
             # Calculate stats
             iter_dict = StatDict()
@@ -445,6 +606,13 @@ def train_classifier(argdict):
         LOG.info('Accuracy Std. dev: {:.2f}'.format(iteration_stats.a_stdev()))
     else:
         LOG.info('Training portion was 100%. No testing performed.')
+
+
+def load_urldict(url_path):
+    if url_path is not None and os.path.exists(url_path):
+        normlog("Parsing URL list...")
+        return get_urls(url_path)
+    return {}
 
 
 # =============================================================================
@@ -586,23 +754,75 @@ def process_args(argdict):
     :type argdict: dict
     """
 
-    def specified(opt, name):
-        path = argdict.get(opt, None)
-        if path is None:
-            raise ConfigError("No {} was specified".format(name))
+    errors = []
+    warnings = []
 
-    def exists(opt, name):
-        path = argdict.get(opt, None)
-        if path is not None and not os.path.exists(path):
-            raise ConfigError('The specified {} "{}" was not found'.format(name, path))
+    def specified(opt, warn=False, msg=None):
+        nonlocal errors, warnings
+        use_list = warnings if warn else errors
+        path = argdict.get(opt, '')
+        if not path.strip():
+            use_msg = 'Option "{}" was not specified' if msg is None else msg
+            use_list.append(use_msg.format(opt))
+            return False
+        return True
 
-    def specified_and_exists(opt, name):
-        specified(opt, name)
-        exists(opt, name)
+    def _exist_path(path, warn=False, msg=None):
+        nonlocal errors, warnings
+        use_list = warnings if warn else errors
+        if not os.path.exists(path):
+            use_msg = 'The path "{}" for option "{}" was not found' if msg is None else msg
+            use_list.append(use_msg.format(path, opt))
+            return False
+        return True
 
-    specified_and_exists('label_path', 'Label Path')
-    exists('url_path', "URL Path")
-    specified_and_exists('train_dirs', 'document root')
+    def exists(opt, warn=False, msg=None):
+        path = argdict.get(opt, '')
+        return _exist_path(path, warn, msg)
+
+    def exists_list(opt, warn=False, msg=None):
+        error_found = False
+        for path in argdict.get(opt, '').split(':'):
+            error_found |= _exist_path(path, warn, msg)
+        return error_found
+
+    def specified_and_exists(opt, warn=False, spec_msg=None, exist_msg=None):
+        specified(opt, warn, spec_msg) and exists(opt, warn, exist_msg)
+
+    def specified_and_exists_list(opt, warn=False, spec_msg=None, exist_msg=None):
+        specified(opt, warn, spec_msg) and exists_list(opt, warn, exist_msg)
+
+    # Extract the subcommand to do conditional checks.
+    subcommand = argdict.get('subcommand')
+
+    if subcommand == TRAIN_CMD:
+        specified_and_exists('label_path')
+        specified_and_exists_list(TRAIN_DIRS)
+    elif subcommand == TEST_CMD:
+        specified_and_exists_list(TEST_DIRS)
+        specified(TEST_OUTPUT)
+    elif subcommand == NFOLD_ITERS:
+        specified(NFOLD_ITERS)
+        specified(TRAIN_RATIO)
+
+    specified_and_exists(LANG_PATH, warn=True,
+                         spec_msg='Option "{}" was not specified. No language features will be used.',
+                         exist_msg='Path "{}" for option "{}" was not specified. No language features will be used.')
+    specified_and_exists(URL_PATH, warn=True,
+                         spec_msg='Option "{}" was not specified. No URL features will be used.',
+                         exist_msg='Path "{}" for option "{}" was not specified. No URL features will be used.')
+    specified_and_exists(MODEL_PATH)
+
+    for warning in warnings:
+        LOG.warning('{}'.format(warning))
+
+    if errors:
+        LOG.critical('Errors encountered running command: "{}"'.format(' '.join(sys.argv)))
+        for error in errors:
+            LOG.critical(error)
+        sys.exit(2)
+
+
 
     # Add items to the pythonpath
     for path_elt in argdict.get('python_paths', '').split(':'):
@@ -623,10 +843,36 @@ def process_args(argdict):
         elif default is not None:
             argdict[arg] = default
 
-    parse('num_features', int)
-    parse('random_seed', int)
-    parse('nfold_iterations', int, 1)
-    parse('train_ratio', float, 1.0)
+    parse(NUM_FEATS, int)
+    parse(RAND_SEED, int)
+    parse(NFOLD_ITERS, int, 1)
+    parse(TRAIN_RATIO, float, 1.0)
+    parse(ACCEPTANCE_THRESH, float, 0.5)
+
+# -------------------------------------------
+# String constants to use in place of literals
+# to prevent typos.
+# -------------------------------------------
+ACCEPTANCE_THRESH = 'acceptance_thresh'
+DEBUG = 'debug'
+LANG_PATH = 'lang_list'
+MODEL_PATH = 'model_path'
+NFOLD_ITERS = 'nfold_iterations'
+NUM_FEATS   = 'num_features'
+RAND_SEED   = 'random_seed'
+TEST_DIRS = 'test_dirs'
+TEST_OUTPUT = 'test_output'
+TRAIN_DIRS = 'train_dirs'
+TRAIN_RATIO = 'train_ratio'
+URL_PATH = 'url_list'
+USE_BIGRAMS = 'use_bigrams'
+
+DEFAULT_STR = 'DEFAULT'
+
+NFOLD_CMD = 'nfold'
+TEST_CMD  = 'test'
+TRAIN_CMD = 'train'
+# -------------------------------------------
 
 
 if __name__ == '__main__':
@@ -637,8 +883,8 @@ if __name__ == '__main__':
     common_parser = ArgumentParser(add_help=False)
     common_parser.add_argument('-v', '--verbose', action='count', help='Increase verbosity of output.')
     common_parser.add_argument('-c', '--config', help='Alternate config', type=def_cp)
-    common_parser.add_argument('-d', '--debug', help='Turn on debugging output', action='store_true')
-    common_parser.add_argument('-f', '--force', help="Overwrite files.")
+    common_parser.add_argument('-d', '--debug', help='Turn on debugging output', action='store_true', default=None)
+    common_parser.add_argument('-f', '--force', help="Overwrite files.", action='store_true', default=None)
     common_parser.add_argument('-m', '--model-path', help="Path to classifier model.")
 
     # Set up the subparsers.
@@ -650,14 +896,14 @@ if __name__ == '__main__':
     # -------------------------------------------
 
     # Training
-    train_p = subparsers.add_parser('train', parents=[common_parser])
+    train_p = subparsers.add_parser(TRAIN_CMD, parents=[common_parser])
     train_p.add_argument('--num-features', help='Number of features to limit training the model with.')
 
     # Testing parser
-    test_p = subparsers.add_parser('test', parents=[common_parser])
+    test_p = subparsers.add_parser(TEST_CMD, parents=[common_parser])
 
     # Nfold cross-validation parser
-    nfold_p = subparsers.add_parser('nfold', parents=[common_parser])
+    nfold_p = subparsers.add_parser(NFOLD_CMD, parents=[common_parser])
     nfold_p.add_argument('--train-ratio', help='Ratio of training data to testing data, as a decimal between (0-1].', type=float)
     nfold_p.add_argument('--nfold-iterations', help='Number of train/test iterations to perform.', type=int)
     nfold_p.add_argument('--random-seed', help='Integer to fix randomization of data shuffling between program invocations.')
@@ -688,17 +934,18 @@ if __name__ == '__main__':
 
     # -------------------------------------------
 
-    if args.subcommand == 'train':
+    if args.subcommand == TRAIN_CMD:
         # Perform the same task as training,
         # but without multiple iterations.
-        argdict['train_ratio'] = 1.0
-        argdict['nfold_iterations'] = 1
+        argdict[TRAIN_RATIO] = 1.0
+        argdict[NFOLD_ITERS] = 1
         train_classifier(argdict)
-    elif args.subcommand == 'test':
+    elif args.subcommand == TEST_CMD:
         test_classifier(argdict)
-    elif args.subcommand == 'nfold':
+    elif args.subcommand == NFOLD_CMD:
         # Perform n-fold cross-validation on
         # the training data.
         train_classifier(argdict)
     else:
         raise ArgumentError("Unrecognized subcommand")
+

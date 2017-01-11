@@ -12,13 +12,19 @@ label_path = ./data/doc_labels.txt
 # list of all the URLs for the various documents.
 url_list = ./data/doc_urls.txt.gz
 
+# Document containing a list of languages
+lang_list = ./data/languages.txt
+
 # Root dirs for training docs (ending with .freki or .freki.gz)
-# (separate multiple directories with commas)
-train_dirs = ./dir_0
+# (separate multiple directories with colon ':')
+train_dirs = ./dir_0:./dir_1
 
 # Root dir for testing docs (ending with .freki or .freki.gz)
 # (separate multiple directories with commas)
 test_dirs = ./dir_1
+
+# File to which classification predictions will be written.
+test_output = ./classifications.txt
 
 # Where the model path is saved
 model_path = doc-classifier.model
