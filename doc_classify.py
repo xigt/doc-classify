@@ -85,18 +85,6 @@ def get_urls(url_path):
     f.close()
     return url_mapping
 
-def load_langset(lang_path):
-    """
-    :param lang_path: Path to list of languages
-    :rtype: set
-    """
-    lang_set = set([])
-    if lang_path and os.path.exists(lang_path):
-        with open(lang_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                lang_set.add(line.strip().lower())
-    return lang_set
-
 
 # -------------------------------------------
 # Process the list of IGT containing docs
@@ -411,7 +399,7 @@ def get_data(data_dirs, url_dict, lang_set, label_dict=None, training=False):
     Get a list of doc instances (with extracted features) for a
     given list of data directories.
 
-    :rtype: DocInstance
+    :rtype: GeneratorType[DocInstance]
     """
     freki_path_list = get_freki_files(data_dirs)
     for freki_path in freki_path_list:
@@ -433,21 +421,29 @@ def get_testing_data(root_dir, url_dict, lang_set):
 # =============================================================================
 # Training/Testing Procedures.
 # =============================================================================
+format_widths = (8, 10.3, 10.3)
+format_string = '{{:{}s}}{{:{}g}}{{:{}g}}'.format(*format_widths)
+header_string = '{{:>{}s}}{{:>{}s}}{{:>{}s}}'.format(*[int(i) for i in format_widths]).format(
+    'doc_id', 'prob_t', 'prob_f')
+
+def format_output(doc_id, prob_t, prob_f):
+    return format_string.format(doc_id, prob_t, prob_f)
+
+def write_output(stream, doc_id, prob_t, prob_f):
+    stream.write(format_output(doc_id, prob_t, prob_f)+'\n')
+
 
 def test_classifier(argdict):
     """
     :type argdict: dict
     """
     # --0) Attempt to open the file to write classifications.
-    test_output = argdict.get(TEST_OUTPUT)
-    test_output_dir = os.path.dirname(test_output)
+    test_output_dir = argdict.get(TEST_OUTPUT)
     try:
         os.makedirs(test_output_dir, exist_ok=True)
     except OSError:
         LOG.critical('Directory "{}" could not be created.'.format(test_output_dir))
-
-    if not os.access(test_output_dir, os.W_OK):
-        LOG.critical('Directory for output file "{}" not writable.'.format(test_output))
+        sys.exit(2)
 
     # --1) Load the classifier...
     normlog("Loading model...")
@@ -461,44 +457,38 @@ def test_classifier(argdict):
     lang_set = load_langset(argdict.get(LANG_PATH))
 
     # --3) Get the files to be classified...
-    data = list(get_testing_data(argdict.get(TEST_DIRS), url_dict, lang_set))
-
-    # split docs into pos, neg
-    pos_docs = []
-    neg_docs = []
-
-    # Step through each datapoint so as to be able to not wait until the entire run is complete
-    # when working on a large dataset.
+    data_iter = get_testing_data(argdict.get(TEST_DIRS), url_dict, lang_set)
 
 
-    # --4) Classify the testing data..
-    test_probs = cw.test(data)
+    # --4) Classify the testing data
+    #      one instance at a time, and
+    #      write out results iteratively.
+    results_file = open(os.path.join(test_output_dir,
+                                     'all_classifications.txt'),'w')
+    pos_docs_file = open(os.path.join(test_output_dir,
+                                 'positive_docs.txt'), 'w')
 
-    acceptance_thresh = argdict.get(ACCEPTANCE_THRESH)
-    for distribution, doc in zip(test_probs, data):
-        prob_t, prob_f = distribution
+    results_file.write(header_string+'\n')
+    pos_docs_file.write(header_string+'\n')
+
+    # -------------------------------------------
+    LOG.info("Writing out classifications...")
+    for datum in data_iter:
+        test_distributions = cw.test([datum])
+
+        acceptance_thresh = argdict.get(ACCEPTANCE_THRESH)
+        prob_t, prob_f = test_distributions[0]
+
+        # Now, write out the classification as it happens as
+        #  doc_id  Prob(t)    Prob(f)
+        write_output(results_file, datum.doc_id, prob_t, prob_f)
+        results_file.flush()
+
         if prob_t > acceptance_thresh:
-            pos_docs.append((doc.doc_id, prob_t, prob_f))
-        else:
-            neg_docs.append((doc.doc_id, prob_t, prob_f))
+            write_output(pos_docs_file, datum.doc_id, prob_t, prob_f)
 
-    def list_docs(title, docs):
-        f.write(title+'\n')
-        f.write('{:8s}{:10s}{:10s}\n'.format('doc_id', 'prob_t', 'prob_f'+'\n'))
-        for doc_id, prob_t, prob_f in docs:
-            f.write('{:8s}{:10.3g}{:10.3g}\n'.format(doc_id, prob_t, prob_f))
-
-    LOG.info("Writing out test classifications...")
-
-    pos_docs.sort(key=lambda t: int(t[0]))
-    neg_docs.sort(key=lambda t: int(t[0]))
-
-    with open(test_output, 'w') as f:
-        divider = '- '*40+'\n'
-        f.write(divider+'Classification Results\n'+divider)
-        f.write('Acceptance threshold: {:.3e}\n'.format(acceptance_thresh)+divider)
-        list_docs('POSITIVE DOCS', pos_docs)
-        list_docs('NEGATIVE DOCS', neg_docs)
+    results_file.close()
+    pos_docs_file.close()
 
     LOG.info("Testing Complete.")
 
@@ -630,6 +620,20 @@ def load_urldict(url_path):
         normlog("Parsing URL list...")
         return get_urls(url_path)
     return {}
+
+
+def load_langset(lang_path):
+    """
+    :param lang_path: Path to list of languages
+    :rtype: set
+    """
+    normlog('Loading language list...')
+    lang_set = set([])
+    if lang_path and os.path.exists(lang_path):
+        with open(lang_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                lang_set.add(line.strip().lower())
+    return lang_set
 
 
 # =============================================================================
@@ -878,7 +882,7 @@ NFOLD_ITERS = 'nfold_iterations'
 NUM_FEATS   = 'num_features'
 RAND_SEED   = 'random_seed'
 TEST_DIRS = 'test_dirs'
-TEST_OUTPUT = 'test_output'
+TEST_OUTPUT = 'test_output_dir'
 TRAIN_DIRS = 'train_dirs'
 TRAIN_RATIO = 'train_ratio'
 URL_PATH = 'url_list'
@@ -913,19 +917,30 @@ if __name__ == '__main__':
     # Subcommand parsers
     # -------------------------------------------
 
+    # Train_parser, for train, traintest, and nfold
+    train_parent_parser = ArgumentParser(add_help=False)
+    train_parent_parser.add_argument('--train-dirs', help='Colon-separated list of directories from which to draw training docs.')
+    train_parent_parser.add_argument('--num-features', help='Number of features to limit training the model with.')
+    train_parent_parser.add_argument('--label-path', help='Path to the label file to use for model training.')
+
+    # Test_parser, for train, traintest
+    test_parent_parser = ArgumentParser(add_help=False)
+    test_parent_parser.add_argument('--test-output-dir', help='Output directory to place classification output.')
+    test_parent_parser.add_argument('--test-dirs', help='Colon-separated list of directories from which to pull test files.')
+
     # Training
-    train_p = subparsers.add_parser(TRAIN_CMD, parents=[common_parser])
-    train_p.add_argument('--num-features', help='Number of features to limit training the model with.')
+    train_parser = subparsers.add_parser(TRAIN_CMD, parents=[common_parser, train_parent_parser])
 
     # Testing parser
-    test_p = subparsers.add_parser(TEST_CMD, parents=[common_parser])
+    test_p = subparsers.add_parser(TEST_CMD, parents=[common_parser, test_parent_parser])
 
     # train/test
-    traintest_p = subparsers.add_parser(TRAINTEST_CMD, parents=[common_parser])
-
+    traintest_p = subparsers.add_parser(TRAINTEST_CMD, parents=[common_parser,
+                                                                train_parent_parser,
+                                                                test_parent_parser])
 
     # Nfold cross-validation parser
-    nfold_p = subparsers.add_parser(NFOLD_CMD, parents=[common_parser])
+    nfold_p = subparsers.add_parser(NFOLD_CMD, parents=[common_parser, train_parent_parser])
     nfold_p.add_argument('--train-ratio', help='Ratio of training data to testing data, as a decimal between (0-1].', type=float)
     nfold_p.add_argument('--nfold-iterations', help='Number of train/test iterations to perform.', type=int)
     nfold_p.add_argument('--random-seed', help='Integer to fix randomization of data shuffling between program invocations.')
