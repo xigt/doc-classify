@@ -16,6 +16,9 @@ from urllib.parse import urlparse
 # -------------------------------------------
 import logging
 
+from sklearn.ensemble.weight_boosting import AdaBoostClassifier
+from sklearn.feature_selection.mutual_info_ import mutual_info_classif
+
 LOG = logging.getLogger()
 NORM_LEVEL = 40
 logging.addLevelName(NORM_LEVEL, 'NORM')
@@ -116,7 +119,7 @@ def get_url_features(url):
     p = urlparse(url)
     feats.add('url_domain_' + p.netloc)
     [feats.add('url_domain_elt_' + elt) for elt in p.netloc.split('.')]
-    feats.add('url_filename_' + os.path.basename(p.path))
+    [feats.add('url_filename_elt_' + elt) for elt in re.split('\_\-\.', os.path.basename(p.path))]
 
     for elt in os.path.dirname(p.path.strip()).split('/'):
         if elt.strip():
@@ -150,32 +153,42 @@ def get_doc_features(path, url_dict, lang_set):
 
     use_bigrams = true_val(argdict.get(USE_BIGRAMS, False))
 
+    num_unknowns = 0
+
     for l_i, line in enumerate(fd.lines()):
 
-        words = []
+        c = Counter(line)
+        num_unknowns += c.get('\uFFFD', 0)
+
         # Operate on each of the words of the sentence.
         words = re.findall('\w+', line, flags=re.UNICODE)
+        words = [w.lower() for w in words]
         for w_i, word in enumerate(words):
-            word = word.lower()
-            words.append(word)
             word_lengths.append(len(word))
 
             # Add words as special feature if in the range
             # where it might be part of the title or author.
-            if l_i < 20:
+            if l_i < 10:
                 text_feats['title_word_{}'.format(word)] = 1
 
             # Check whether a word is a language name in
             # the text or title
             if lang_set and word in lang_set:
                 text_feats['has_langname'] = 1
-                if l_i < 20:
+                if l_i < 10:
                     text_feats['has_lang_name_in_title'] = 1
+                if w_i > 0:
+                    if words[w_i - 1] == 'in':
+                        text_feats['has_in_langname'] = 1
+                        if l_i < 10:
+                            text_feats['has_in_langname_in_title'] = 1
 
             # Add bigrams as features if enabled.
             if use_bigrams and w_i < len(words) - 2:
                 w_j = words[w_i + 1]
                 text_feats['bigram_{}_{}'.format(w_i, w_j)] = 1
+                if l_i < 10:
+                    text_feats['title_bigram_{}_{}'.format(w_i, w_j)] = 1
 
         text_feats.update(['word_' + w for w in words])
 
@@ -185,6 +198,9 @@ def get_doc_features(path, url_dict, lang_set):
         [fonts.add(f) for f in line]
 
     feat_dict = dict(text_feats)
+
+    if num_unknowns > 10:
+        feat_dict['many_unknown_chars'] = 1
 
     # -- 2) Add URL features
     if url_dict:
@@ -196,6 +212,7 @@ def get_doc_features(path, url_dict, lang_set):
     if len(word_lengths) > 1:
         avg_wd_length = statistics.mean(word_lengths)
         feat_dict['long_words'] = avg_wd_length > 10
+        feat_dict['very_long_words'] = avg_wd_length > 20
 
     # Are there a ton of fonts in the doc?
     num_fonts = len(fonts)
@@ -212,7 +229,8 @@ def get_doc_features(path, url_dict, lang_set):
 
 class ClassifierWrapper(object):
     def __init__(self):
-        self.learner = LogisticRegression()
+        # self.learner = LogisticRegression()
+        self.learner = AdaBoostClassifier()
         self.dv = DictVectorizer(dtype=int)
         self.feat_selector = None
         self.classes = []
@@ -233,8 +251,8 @@ class ClassifierWrapper(object):
         # training.
         if testing:
             if self.feat_selector is not None:
-                LOG.info('Feature selection was enabled during training, limiting to {} features.'.format(
-                    self.feat_selector.k))
+                # LOG.info('Feature selection was enabled during training, limiting to {} features.'.format(
+                #     self.feat_selector.k))
                 return self.feat_selector.transform(vec)
             else:
                 return vec
@@ -388,15 +406,13 @@ def get_freki_files(data_dirs):
                     file_list.append(os.path.join(dirpath, filename))
     return file_list
 
-
 def get_data(data_dirs, url_dict, lang_set, label_dict=None, training=False):
     """
     Get a list of doc instances (with extracted features) for a
     given list of data directories.
 
-    :rtype: list[DocInstance]
+    :rtype: DocInstance
     """
-    data = []
     freki_path_list = get_freki_files(data_dirs)
     for freki_path in freki_path_list:
         doc_id = get_doc_id(freki_path)
@@ -404,9 +420,7 @@ def get_data(data_dirs, url_dict, lang_set, label_dict=None, training=False):
             feats = get_doc_features(freki_path, url_dict, lang_set)
             label = label_dict[doc_id] if label_dict else None
             d = DocInstance(doc_id, label, feats, freki_path)
-            data.append(d)
-
-    return data
+            yield d
 
 
 def get_training_data(root_dir, url_dict, lang_set, label_dict):
@@ -447,14 +461,18 @@ def test_classifier(argdict):
     lang_set = load_langset(argdict.get(LANG_PATH))
 
     # --3) Get the files to be classified...
-    data = get_testing_data(argdict.get(TEST_DIRS), url_dict, lang_set)
-
-    # --4) Classify the testing data..
-    test_probs = cw.test(data)
+    data = list(get_testing_data(argdict.get(TEST_DIRS), url_dict, lang_set))
 
     # split docs into pos, neg
     pos_docs = []
     neg_docs = []
+
+    # Step through each datapoint so as to be able to not wait until the entire run is complete
+    # when working on a large dataset.
+
+
+    # --4) Classify the testing data..
+    test_probs = cw.test(data)
 
     acceptance_thresh = argdict.get(ACCEPTANCE_THRESH)
     for distribution, doc in zip(test_probs, data):
@@ -471,6 +489,10 @@ def test_classifier(argdict):
             f.write('{:8s}{:10.3g}{:10.3g}\n'.format(doc_id, prob_t, prob_f))
 
     LOG.info("Writing out test classifications...")
+
+    pos_docs.sort(key=lambda t: int(t[0]))
+    neg_docs.sort(key=lambda t: int(t[0]))
+
     with open(test_output, 'w') as f:
         divider = '- '*40+'\n'
         f.write(divider+'Classification Results\n'+divider)
@@ -499,7 +521,7 @@ def train_classifier(argdict):
 
     # --3) Extract features from documents with known labels
     LOG.debug("Extracting training data...")
-    data = get_training_data(argdict.get(TRAIN_DIRS), url_dict, lang_set, label_dict)
+    data = list(get_training_data(argdict.get(TRAIN_DIRS), url_dict, lang_set, label_dict))
 
     LOG.info("Beginning training...")
 
@@ -542,7 +564,7 @@ def train_classifier(argdict):
             iter_model_path = model_path
 
         LOG.info('Training model {} with {} instances'.format(iter_model_path, len(train_portion)))
-        LOG.debug('Training IDs: {}'.format(','.join(['{}:{}'.format(d.doc_id, d.label) for d in train_portion])))
+        LOG.debug('Positive Docs: {}'.format(','.join(['{}:{}'.format(d.doc_id, d.label) for d in train_portion if d.label is True])))
 
         # -------------------------------------------
         # Create the classifier wrapper, train and save.
@@ -553,8 +575,6 @@ def train_classifier(argdict):
             weight_path = os.path.splitext(iter_model_path)[0]+'_weights.txt'
         else:
             weight_path = None
-
-        print(weight_path)
 
         cw.train(train_portion,
                  num_feats=argdict.get(NUM_FEATS),
@@ -764,7 +784,7 @@ def process_args(argdict):
             return False
         return True
 
-    def _exist_path(path, warn=False, msg=None):
+    def _exist_path(path, opt, warn=False, msg=None):
         nonlocal errors, warnings
         use_list = warnings if warn else errors
         if not os.path.exists(path):
@@ -775,12 +795,12 @@ def process_args(argdict):
 
     def exists(opt, warn=False, msg=None):
         path = argdict.get(opt, '')
-        return _exist_path(path, warn, msg)
+        return _exist_path(path, opt, warn, msg)
 
     def exists_list(opt, warn=False, msg=None):
         error_found = False
         for path in argdict.get(opt, '').split(':'):
-            error_found |= _exist_path(path, warn, msg)
+            error_found |= _exist_path(path, opt, warn, msg)
         return error_found
 
     def specified_and_exists(opt, warn=False, spec_msg=None, exist_msg=None):
@@ -869,6 +889,7 @@ DEFAULT_STR = 'DEFAULT'
 NFOLD_CMD = 'nfold'
 TEST_CMD  = 'test'
 TRAIN_CMD = 'train'
+TRAINTEST_CMD = 'traintest'
 # -------------------------------------------
 
 
@@ -898,6 +919,10 @@ if __name__ == '__main__':
 
     # Testing parser
     test_p = subparsers.add_parser(TEST_CMD, parents=[common_parser])
+
+    # train/test
+    traintest_p = subparsers.add_parser(TRAINTEST_CMD, parents=[common_parser])
+
 
     # Nfold cross-validation parser
     nfold_p = subparsers.add_parser(NFOLD_CMD, parents=[common_parser])
@@ -932,12 +957,17 @@ if __name__ == '__main__':
     # -------------------------------------------
 
     if args.subcommand == TRAIN_CMD:
-        # Perform the same task as training,
+        # Perform the same task as nfold,
         # but without multiple iterations.
         argdict[TRAIN_RATIO] = 1.0
         argdict[NFOLD_ITERS] = 1
         train_classifier(argdict)
     elif args.subcommand == TEST_CMD:
+        test_classifier(argdict)
+    elif args.subcommand == TRAINTEST_CMD:
+        argdict[TRAIN_RATIO] = 1.0
+        argdict[NFOLD_ITERS] = 1
+        train_classifier(argdict)
         test_classifier(argdict)
     elif args.subcommand == NFOLD_CMD:
         # Perform n-fold cross-validation on
