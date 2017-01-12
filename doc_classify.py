@@ -301,7 +301,18 @@ class ClassifierWrapper(object):
             return np.ones((len(self.dv.get_feature_names())), dtype=bool)
 
     def weights(self):
-        return {f: self.learner.coef_[0][j] for j, f in enumerate(self.feat_names()[self.feat_supports()])}
+        """
+        Get a list of features and their importances,
+        either for logistic regression or adaboost.
+
+        :return:
+        """
+        if isinstance(self.learner, AdaBoostClassifier):
+            feat_weights = self.learner.feature_importances_
+            return {f: feat_weights[j] for j, f in enumerate(self.feat_names()[self.feat_supports()])
+                    if feat_weights[j] != 0}
+        elif isinstance(self.learner, LogisticRegression):
+            return {f: self.learner.coef_[0][j] for j, f in enumerate(self.feat_names()[self.feat_supports()])}
 
     def dump_weights(self, path, n=-1):
         with open(path, 'w') as f:
