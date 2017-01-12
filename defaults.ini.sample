@@ -24,7 +24,7 @@ train_dirs = ./dir_0:./dir_1
 test_dirs = ./dir_1
 
 # File to which classification predictions will be written.
-test_output = ./classifications.txt
+test_output_dir = ./classifications.txt
 
 # Where the model path is saved
 model_path = doc-classifier.model
