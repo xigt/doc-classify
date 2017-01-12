@@ -837,7 +837,7 @@ def process_args(argdict):
         specified_and_exists_list(TEST_DIRS)
         specified_and_exists(MODEL_PATH)
         specified(TEST_OUTPUT)
-    elif subcommand == NFOLD_ITERS:
+    elif subcommand == NFOLD_CMD:
         specified(NFOLD_ITERS)
         specified(TRAIN_RATIO)
         specified_and_exists_list(TRAIN_DIRS)
