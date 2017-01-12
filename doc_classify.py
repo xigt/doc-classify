@@ -6,6 +6,7 @@ from argparse import ArgumentParser, ArgumentError
 from collections import defaultdict
 from configparser import ConfigParser
 from collections import Counter
+from types import GeneratorType
 import gzip
 import sys
 from gzip import GzipFile
@@ -431,6 +432,7 @@ def format_output(doc_id, prob_t, prob_f):
 
 def write_output(stream, doc_id, prob_t, prob_f):
     stream.write(format_output(doc_id, prob_t, prob_f)+'\n')
+    stream.flush()
 
 
 def test_classifier(argdict):
@@ -482,7 +484,6 @@ def test_classifier(argdict):
         # Now, write out the classification as it happens as
         #  doc_id  Prob(t)    Prob(f)
         write_output(results_file, datum.doc_id, prob_t, prob_f)
-        results_file.flush()
 
         if prob_t > acceptance_thresh:
             write_output(pos_docs_file, datum.doc_id, prob_t, prob_f)
@@ -493,7 +494,7 @@ def test_classifier(argdict):
     LOG.info("Testing Complete.")
 
 
-def train_classifier(argdict):
+def train_classifier(argdict, save=False):
     """
     Train the classifier.
 
@@ -572,7 +573,8 @@ def train_classifier(argdict):
 
         # Uncomment this out to save all N iterations
         # of the classifier.
-        # cw.save(iter_model_path)
+        if save:
+            cw.save(iter_model_path)
         # -------------------------------------------
 
         if train_ratio < 1.0:
@@ -819,8 +821,10 @@ def process_args(argdict):
     if subcommand == TRAIN_CMD:
         specified_and_exists('label_path')
         specified_and_exists_list(TRAIN_DIRS)
+        specified(MODEL_PATH)
     elif subcommand == TEST_CMD:
         specified_and_exists_list(TEST_DIRS)
+        specified_and_exists(MODEL_PATH)
         specified(TEST_OUTPUT)
     elif subcommand == NFOLD_ITERS:
         specified(NFOLD_ITERS)
@@ -832,7 +836,6 @@ def process_args(argdict):
     specified_and_exists(URL_PATH, warn=True,
                          spec_msg='Option "{}" was not specified. No URL features will be used.',
                          exist_msg='Path "{}" for option "{}" was not specified. No URL features will be used.')
-    specified_and_exists(MODEL_PATH)
 
     for warning in warnings:
         LOG.warning('{}'.format(warning))
@@ -976,7 +979,7 @@ if __name__ == '__main__':
         # but without multiple iterations.
         argdict[TRAIN_RATIO] = 1.0
         argdict[NFOLD_ITERS] = 1
-        train_classifier(argdict)
+        train_classifier(argdict, save=True)
     elif args.subcommand == TEST_CMD:
         test_classifier(argdict)
     elif args.subcommand == TRAINTEST_CMD:
