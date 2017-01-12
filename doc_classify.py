@@ -840,6 +840,7 @@ def process_args(argdict):
     elif subcommand == NFOLD_ITERS:
         specified(NFOLD_ITERS)
         specified(TRAIN_RATIO)
+        specified_and_exists_list(TRAIN_DIRS)
 
     specified_and_exists(LANG_PATH, warn=True,
                          spec_msg='Option "{}" was not specified. No language features will be used.',
