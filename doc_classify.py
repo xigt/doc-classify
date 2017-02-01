@@ -234,6 +234,8 @@ def get_labels(label_path):
 
     with open(label_path, 'r') as f:
         for line in f:
+            if not line.strip():
+                continue
             doc_id, label = line.split()[:2]
             if label.lower() not in bool_opts:
                 raise Exception('Unknown label "{}"'.format(label))
