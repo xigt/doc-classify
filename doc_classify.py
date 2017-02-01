@@ -359,7 +359,9 @@ def test_classifier(argdict):
         test_distributions = cw.test([datum])
 
         acceptance_thresh = argdict.get(ACCEPTANCE_THRESH)
-        prob_t, prob_f = test_distributions[0]
+
+        prob_t = test_distributions[0].get(True)
+        prob_f = test_distributions[0].get(False)
 
         # Now, write out the classification as it happens as
         #  doc_id  Prob(t)    Prob(f)
