@@ -27,7 +27,7 @@ test_dirs = ./dir_1
 test_output_dir = ./classifications.txt
 
 # Where the model path is saved
-model_path = doc-classifier.model
+model_path = ./models/doc_classifier.model
 
 # Any necessary paths required to add to the pythonpath.
 # Multiple values should be separated by a colon ':'
@@ -44,6 +44,10 @@ model_path = doc-classifier.model
 # The model is trained/tested with all available
 # features by default, or if this number is <=0
 ;num_features = 80000
+
+# Use bigrams as features. If enabled, limiting the
+# number of features is STRONGLY reccomended.
+;use_bigrams = True
 
 # -------------------------------------------
 # Evaluate on training data

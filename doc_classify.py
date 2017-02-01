@@ -17,14 +17,12 @@ from urllib.parse import urlparse
 # -------------------------------------------
 import logging
 
-from sklearn.ensemble.weight_boosting import AdaBoostClassifier
-from sklearn.feature_selection.mutual_info_ import mutual_info_classif
+
 
 LOG = logging.getLogger()
 NORM_LEVEL = 40
 logging.addLevelName(NORM_LEVEL, 'NORM')
 stdout_handler = logging.StreamHandler(sys.stdout)
-
 
 stdout_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
 LOG.addHandler(stdout_handler)
@@ -216,126 +214,6 @@ def get_doc_features(path, url_dict, lang_set):
     return feat_dict
 
 
-class ClassifierWrapper(object):
-    def __init__(self):
-        # self.learner = LogisticRegression()
-        self.learner = AdaBoostClassifier()
-        self.dv = DictVectorizer(dtype=int)
-        self.feat_selector = None
-        self.classes = []
-
-    def _vectorize(self, data, testing=False):
-        if testing:
-            return self.dv.transform(data)
-        else:
-            return self.dv.fit_transform(data)
-
-    def _vectorize_and_select(self, data, labels, num_feats=None, testing=False):
-
-        # Start by vectorizing the data.
-        vec = self._vectorize(data, testing=testing)
-
-        # Next, filter the data if in testing mode, according
-        # to whatever feature selector was defined during
-        # training.
-        if testing:
-            if self.feat_selector is not None:
-                # LOG.info('Feature selection was enabled during training, limiting to {} features.'.format(
-                #     self.feat_selector.k))
-                return self.feat_selector.transform(vec)
-            else:
-                return vec
-
-        # Only do feature selection if num_feats is positive.
-        elif num_feats is not None and (num_feats > 0):
-            LOG.info('Feature selection enabled, limiting to {} features.'.format(num_feats))
-            self.feat_selector = SelectKBest(chi2, num_feats)
-            return self.feat_selector.fit_transform(vec, labels)
-
-        else:
-            LOG.info("Feature selection disabled, all available features are used.")
-            return vec
-
-    def train(self, data, num_feats=None, weight_path=None):
-        """
-        :type data: list[DocInstance]
-        """
-        labels = [d.label for d in data]
-        feats = [d.feats for d in data]
-
-        vec = self._vectorize_and_select(feats, labels, num_feats=num_feats, testing=False)
-        self.learner.fit(vec, labels)
-        if weight_path is not None:
-            LOG.info('Writing feature weights to "{}"'.format(weight_path))
-            self.dump_weights(weight_path)
-
-    def test(self, data):
-        """
-        Given a list of document instances, return a list
-        of the probabilities of the Positive, Negative examples.
-
-        :type data: list[DocInstance]
-        :rtype: list[tuple[float, float]]
-        """
-        labels = [d.label for d in data]
-        feats = [d.feats for d in data]
-
-        vec = self._vectorize_and_select(feats, labels, testing=True)
-
-        # Get the index of the True value...
-        t_idx = self.learner.classes_.tolist().index(True)
-        f_idx = 0 if t_idx == 1 else 1
-
-        # Now, make sure the returned list is always [P(True), P(False)]
-        probs = [(p[t_idx], p[f_idx]) for p in self.learner.predict_proba(vec)]
-
-        return probs
-
-    def feat_names(self):
-        return np.array(self.dv.get_feature_names())
-
-    def feat_supports(self):
-        if self.feat_selector is not None:
-            return self.feat_selector.get_support()
-        else:
-            return np.ones((len(self.dv.get_feature_names())), dtype=bool)
-
-    def weights(self):
-        """
-        Get a list of features and their importances,
-        either for logistic regression or adaboost.
-
-        :return:
-        """
-        if isinstance(self.learner, AdaBoostClassifier):
-            feat_weights = self.learner.feature_importances_
-            return {f: feat_weights[j] for j, f in enumerate(self.feat_names()[self.feat_supports()])
-                    if feat_weights[j] != 0}
-        elif isinstance(self.learner, LogisticRegression):
-            return {f: self.learner.coef_[0][j] for j, f in enumerate(self.feat_names()[self.feat_supports()])}
-
-    def dump_weights(self, path, n=-1):
-        with open(path, 'w') as f:
-            sorted_weights = sorted(self.weights().items(), reverse=True, key=lambda x: x[1])
-            for feat_name, weight in sorted_weights[:n]:
-                f.write('{}\t{}\n'.format(feat_name, weight))
-
-    def save(self, path):
-        """
-        Serialize the classifier out to a file.
-        """
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        f = gzip.GzipFile(path, 'w')
-        pickle.dump(self, f)
-        f.close()
-
-    @classmethod
-    def load(cls, path):
-        f = gzip.GzipFile(path, 'r')
-        c = pickle.load(f)
-        assert isinstance(c, ClassifierWrapper)
-        return c
-
 
 true_opts = {'t', 'true', '1', 'on'}
 false_opts = {'f', 'false', '0', 'off'}
@@ -377,18 +255,6 @@ def get_labels(label_path):
 # This section deals with creating a class and methods to simplify selecting
 # documents for testing and training and passing the documents to the classifier.
 # =============================================================================
-
-class DocInstance(object):
-    """
-    Wrapper class to hold the path, doc_id, label, and features
-    """
-
-    def __init__(self, doc_id, label, feats, path):
-        self.path = path
-        self.doc_id = doc_id
-        self.label = label
-        self.feats = feats
-
 
 def get_freki_files(data_dirs):
     """
@@ -487,6 +353,7 @@ def test_classifier(argdict):
     # -------------------------------------------
     LOG.info("Writing out classifications...")
     for datum in data_iter:
+        LOG.debug('Testing doc_id "{}"'.format(datum.doc_id))
         test_distributions = cw.test([datum])
 
         acceptance_thresh = argdict.get(ACCEPTANCE_THRESH)
@@ -571,7 +438,8 @@ def train_classifier(argdict, save=False):
         # -------------------------------------------
         # Create the classifier wrapper, train and save.
         # -------------------------------------------
-        cw = ClassifierWrapper()
+        # cw = LogisticRegressionWrapper()
+        cw = AdaboostWrapper()
 
         if true_val(argdict.get(DEBUG)):
             weight_path = os.path.splitext(iter_model_path)[0]+'_weights.txt'
@@ -600,10 +468,9 @@ def train_classifier(argdict, save=False):
             # Get the test labels, filtering by threshold
             acceptance_thresh = argdict.get(ACCEPTANCE_THRESH, 0.5)
 
-            # Get the index for the "true" class
-            t_idx = cw.learner.classes_.tolist().index(True)
-
-            for prob_t, prob_f in test_probs:
+            for dist in test_probs:
+                # Get the probability of the "True" status of this doc.
+                prob_t = dist.get(True)
                 test_labels.append(prob_t > acceptance_thresh)
 
             # Calculate stats
@@ -979,10 +846,7 @@ if __name__ == '__main__':
 
     # Import nonstandard libs
     from freki.serialize import FrekiDoc
-    from sklearn.feature_extraction.dict_vectorizer import DictVectorizer
-    from sklearn.feature_selection.univariate_selection import SelectKBest, chi2
-    from sklearn.linear_model.logistic import LogisticRegression
-    import numpy as np
+    from riples_classifier.models import ClassifierWrapper, DocInstance, AdaboostWrapper, LogisticRegressionWrapper
 
     # -------------------------------------------
 
