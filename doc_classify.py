@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import os, re, pickle
 import random
+import time
 import statistics
 from argparse import ArgumentParser, ArgumentError
 from collections import defaultdict
 from configparser import ConfigParser
 from collections import Counter
+from sqlite3 import OperationalError
 from types import GeneratorType
 import gzip
 import sys
@@ -17,7 +19,7 @@ from urllib.parse import urlparse
 # -------------------------------------------
 import logging
 
-
+import sqlite3
 
 LOG = logging.getLogger()
 NORM_LEVEL = 40
@@ -319,11 +321,13 @@ def test_classifier(argdict):
     :type argdict: dict
     """
     # --0) Attempt to open the file to write classifications.
-    test_output_dir = argdict.get(TEST_OUTPUT)
+    test_output_db = argdict.get(TEST_OUTPUT)
     try:
-        os.makedirs(test_output_dir, exist_ok=True)
+        test_output_dir = os.path.dirname(test_output_db)
+        if test_output_dir:
+            os.makedirs(os.path.dirname(test_output_db), exist_ok=True)
     except OSError:
-        LOG.critical('Directory "{}" could not be created.'.format(test_output_dir))
+        LOG.critical('Directory "{}" could not be created.'.format(test_output_db))
         sys.exit(2)
 
     # --1) Load the classifier...
@@ -344,17 +348,12 @@ def test_classifier(argdict):
     # --4) Classify the testing data
     #      one instance at a time, and
     #      write out results iteratively.
-    results_file = open(os.path.join(test_output_dir,
-                                     'all_classifications.txt'),'w')
-    pos_docs_file = open(os.path.join(test_output_dir,
-                                 'positive_docs.txt'), 'w')
-
-    results_file.write(header_string+'\n')
-    pos_docs_file.write(header_string+'\n')
 
     # -------------------------------------------
     LOG.info("Writing out classifications...")
     for datum in data_iter:
+
+
         LOG.debug('Testing doc_id "{}"'.format(datum.doc_id))
         test_distributions = cw.test([datum])
 
@@ -365,13 +364,20 @@ def test_classifier(argdict):
 
         # Now, write out the classification as it happens as
         #  doc_id  Prob(t)    Prob(f)
-        write_output(results_file, datum.doc_id, prob_t, prob_f)
+        while True:
+            try:
+                results_db = sqlite3.connect(test_output_db)
+                results_db.execute("CREATE TABLE IF NOT EXISTS docs (docid TEXT PRIMARY KEY, posprob REAL)")
+                cmd = "INSERT OR REPLACE INTO docs VALUES ({0}, {1})".format(datum.doc_id, prob_t)
+                results_db.execute(cmd)
+                results_db.commit()
+                results_db.close()
+                break
+            except OperationalError as oe:
+                time.sleep(0.25)
 
-        if prob_t > acceptance_thresh:
-            write_output(pos_docs_file, datum.doc_id, prob_t, prob_f)
 
-    results_file.close()
-    pos_docs_file.close()
+
 
     LOG.info("Testing Complete.")
 
@@ -768,7 +774,7 @@ NFOLD_ITERS = 'nfold_iterations'
 NUM_FEATS   = 'num_features'
 RAND_SEED   = 'random_seed'
 TEST_DIRS = 'test_dirs'
-TEST_OUTPUT = 'test_output_dir'
+TEST_OUTPUT = 'test_output_db'
 TRAIN_DIRS = 'train_dirs'
 TRAIN_RATIO = 'train_ratio'
 URL_PATH = 'url_list'
