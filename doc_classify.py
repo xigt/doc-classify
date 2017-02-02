@@ -4,11 +4,11 @@ import random
 import time
 import statistics
 from argparse import ArgumentParser, ArgumentError
-from collections import defaultdict
+from collections import defaultdict, Iterable
 from configparser import ConfigParser
 from collections import Counter
 from sqlite3 import OperationalError
-from types import GeneratorType
+
 import gzip
 import sys
 from gzip import GzipFile
@@ -281,7 +281,7 @@ def get_data(data_dirs, url_dict, lang_set, label_dict=None, training=False):
     Get a list of doc instances (with extracted features) for a
     given list of data directories.
 
-    :rtype: GeneratorType[DocInstance]
+    :rtype: Iterable[DocInstance]
     """
     freki_path_list = get_freki_files(data_dirs)
     for freki_path in freki_path_list:
@@ -368,7 +368,7 @@ def test_classifier(argdict):
             try:
                 results_db = sqlite3.connect(test_output_db)
                 results_db.execute("CREATE TABLE IF NOT EXISTS docs (docid TEXT PRIMARY KEY, posprob REAL)")
-                cmd = "INSERT OR REPLACE INTO docs VALUES ({0}, {1})".format(datum.doc_id, prob_t)
+                cmd = "INSERT OR REPLACE INTO docs VALUES ('{0}', {1})".format(datum.doc_id, prob_t)
                 results_db.execute(cmd)
                 results_db.commit()
                 results_db.close()
