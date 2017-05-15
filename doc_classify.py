@@ -856,7 +856,7 @@ if __name__ == '__main__':
 
     # Import nonstandard libs
     from freki.serialize import FrekiDoc
-    from riples_classifier.models import ClassifierWrapper, DocInstance, AdaboostWrapper, LogisticRegressionWrapper
+    from classifier_common.models import ClassifierWrapper, DocInstance, AdaboostWrapper, LogisticRegressionWrapper
 
     # -------------------------------------------
 
