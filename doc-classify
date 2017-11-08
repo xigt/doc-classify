@@ -837,10 +837,15 @@ if __name__ == '__main__':
     nfold_p.add_argument('--nfold-iterations', help='Number of train/test iterations to perform.', type=int)
     nfold_p.add_argument('--random-seed', help='Integer to fix randomization of data shuffling between program invocations.')
 
+
     args = main_parser.parse_args()
 
     # Get the config file,
     config = args.config if args.config is not None else DefaultConfigParser(defaults=defaults.defaults())
+
+    if not args.config and (not os.path.exists(defaults_path)):
+        sys.stderr.write("A config file must be specified as defaults.ini or with --config\n")
+        sys.exit(3)
 
     # Merge config file and commandline arguments into one dict.
     argdict = config.defaults()
@@ -854,9 +859,11 @@ if __name__ == '__main__':
     # -------------------------------------------
     process_args(argdict)
 
+
+
     # Import nonstandard libs
     from freki.serialize import FrekiDoc
-    from classifier_common.models import ClassifierWrapper, DocInstance, AdaboostWrapper, LogisticRegressionWrapper
+    from riples_classifier.models import ClassifierWrapper, DocInstance, AdaboostWrapper, LogisticRegressionWrapper
 
     # -------------------------------------------
 
